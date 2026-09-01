@@ -1,0 +1,39 @@
+name: Build installers
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            label: windows
+          - os: macos-latest
+            label: mac-arm64
+          - os: macos-13
+            label: mac-intel
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - run: npm install
+
+      - run: npm run dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: restaurant-pos-${{ matrix.label }}
+          path: |
+            dist/*.exe
+            dist/*.dmg
+          if-no-files-found: error

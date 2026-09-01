@@ -1,0 +1,52 @@
+{
+  "name": "restaurant-pos",
+  "version": "1.0.0",
+  "description": "Local desktop POS system for restaurants (Electron + SQLite)",
+  "main": "main.js",
+  "author": "Restaurant POS",
+  "scripts": {
+    "start": "electron .",
+    "postinstall": "electron-rebuild -f -w better-sqlite3",
+    "dist": "electron-builder"
+  },
+  "devDependencies": {
+    "@electron/rebuild": "^4.2.0",
+    "electron": "^31.0.0",
+    "electron-builder": "^26.15.3"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.10.0",
+    "exceljs": "^4.4.0",
+    "qrcode": "^1.5.4"
+  },
+  "build": {
+    "appId": "com.restaurantpos.app",
+    "productName": "Restaurant POS",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "db/**/*",
+      "src/**/*",
+      "node_modules/**/*",
+      "package.json"
+    ],
+    "asarUnpack": [
+      "node_modules/better-sqlite3/**/*"
+    ],
+    "win": {
+      "target": "nsis"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true
+    },
+    "mac": {
+      "target": "dmg",
+      "category": "public.app-category.business"
+    }
+  }
+}

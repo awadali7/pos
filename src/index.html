@@ -1,0 +1,349 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Restaurant POS</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600;9..144,700&family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+<div id="app">
+
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark">&#9679;</span>
+      <h1>Counter</h1>
+    </div>
+    <nav class="tabs">
+      <button class="tab-btn active" data-view="order">Take Order</button>
+      <button class="tab-btn" data-view="orders">Orders</button>
+      <button class="tab-btn" data-view="reports">Reports</button>
+      <button class="tab-btn" data-view="menu">Menu</button>
+      <button class="tab-btn" data-view="settings">Settings</button>
+    </nav>
+    <div class="topbar-spacer"></div>
+  </header>
+
+  <!-- ===================== TAKE ORDER VIEW ===================== -->
+  <main id="view-order" class="view">
+
+    <section class="menu-pane">
+      <div class="order-context">
+        <label class="context-field">
+          <span>Order type</span>
+          <select id="order-type">
+            <option value="dine-in">Dine-in</option>
+            <option value="takeaway">Takeaway</option>
+            <option value="delivery">Delivery</option>
+          </select>
+        </label>
+        <label class="context-field">
+          <span>Table / ref</span>
+          <input id="table-label" type="text" placeholder="e.g. T4" />
+        </label>
+        <label class="context-field">
+          <span>Source</span>
+          <select id="order-source">
+            <option value="in-house">In-house</option>
+            <option value="zomato">Zomato</option>
+          </select>
+        </label>
+        <button id="new-order-btn" class="btn btn-ghost">New order</button>
+      </div>
+
+      <div id="category-tabs" class="category-tabs"></div>
+      <div id="subcategory-tabs" class="subcategory-tabs hidden"></div>
+      <div id="menu-grid" class="menu-grid"></div>
+    </section>
+
+    <aside class="ticket-pane">
+      <div class="ticket">
+        <div class="ticket-head">
+          <h2>Order Ticket</h2>
+          <div class="ticket-head-right">
+            <span id="ticket-order-id" class="ticket-order-id">&mdash;</span>
+            <button id="cancel-order-btn" class="link-btn danger hidden">Cancel order</button>
+          </div>
+        </div>
+
+        <div id="ticket-items" class="ticket-items">
+          <p class="ticket-empty">No items yet. Tap a dish to add it.</p>
+        </div>
+
+        <div class="ticket-adjust">
+          <label>
+            <span>Discount</span>
+            <input id="discount-input" type="number" min="0" step="1" value="0" />
+          </label>
+        </div>
+
+        <div class="ticket-totals">
+          <div class="totals-row"><span>Subtotal</span><span id="sum-subtotal">0.00</span></div>
+          <div class="totals-row"><span>Tax</span><span id="sum-tax">0.00</span></div>
+          <div class="totals-row"><span>Discount</span><span id="sum-discount">&minus;0.00</span></div>
+          <div class="totals-row totals-total"><span>Total</span><span id="sum-total">0.00</span></div>
+        </div>
+
+        <button id="checkout-btn" class="btn btn-primary btn-block" disabled>Charge &amp; Close Ticket</button>
+      </div>
+    </aside>
+
+  </main>
+
+  <!-- ===================== ORDERS VIEW ===================== -->
+  <main id="view-orders" class="view hidden">
+    <section class="menu-manage">
+      <div class="manage-head">
+        <h2>Orders</h2>
+      </div>
+
+      <div id="orders-filter" class="category-tabs"></div>
+
+      <table class="item-table">
+        <thead>
+          <tr>
+            <th>#</th>
+            <th>Type</th>
+            <th>Table / ref</th>
+            <th>Source</th>
+            <th>Status</th>
+            <th>Total</th>
+            <th>Created</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody id="orders-table-body"></tbody>
+      </table>
+    </section>
+  </main>
+
+  <!-- ===================== REPORTS VIEW ===================== -->
+  <main id="view-reports" class="view hidden">
+    <section class="menu-manage">
+      <div class="manage-head">
+        <h2>Reports</h2>
+      </div>
+
+      <div class="reports-toolbar">
+        <div id="reports-filter" class="category-tabs"></div>
+        <div class="reports-custom-range">
+          <label class="context-field">
+            <span>From</span>
+            <input id="reports-from" type="date" />
+          </label>
+          <label class="context-field">
+            <span>To</span>
+            <input id="reports-to" type="date" />
+          </label>
+          <button id="reports-export-btn" class="btn btn-ghost">Export to Excel</button>
+        </div>
+      </div>
+
+      <div id="reports-kpis" class="kpi-row"></div>
+
+      <div class="reports-columns">
+        <div class="reports-panel">
+          <h3>Top items</h3>
+          <div id="reports-top-items" class="bar-list"></div>
+        </div>
+        <div class="reports-panel">
+          <h3>By category</h3>
+          <div id="reports-by-category" class="bar-list"></div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <!-- ===================== MENU MANAGEMENT VIEW ===================== -->
+  <main id="view-menu" class="view hidden">
+    <section class="menu-manage">
+      <div class="manage-head">
+        <h2>Menu items</h2>
+        <button id="add-item-btn" class="btn btn-primary">Add item</button>
+      </div>
+
+      <div class="category-manage">
+        <div class="category-manage-group">
+          <label class="context-field">
+            <span>New category</span>
+            <input id="new-category-name" type="text" placeholder="e.g. Soups" />
+          </label>
+          <button id="add-category-btn" class="btn btn-ghost">Add category</button>
+        </div>
+        <div class="category-manage-group">
+          <label class="context-field">
+            <span>Under category</span>
+            <select id="new-subcategory-parent"></select>
+          </label>
+          <label class="context-field">
+            <span>New subcategory</span>
+            <input id="new-subcategory-name" type="text" placeholder="e.g. Vegetarian" />
+          </label>
+          <button id="add-subcategory-btn" class="btn btn-ghost">Add subcategory</button>
+        </div>
+        <div class="category-manage-group">
+          <label class="context-field">
+            <span>Set GST % for</span>
+            <select id="bulk-gst-scope"></select>
+          </label>
+          <label class="context-field">
+            <span>New GST %</span>
+            <input id="bulk-gst-rate" type="number" min="0" step="0.5" placeholder="e.g. 5" />
+          </label>
+          <button id="bulk-gst-apply-btn" class="btn btn-ghost">Apply</button>
+        </div>
+      </div>
+
+      <div id="category-manage-list" class="category-manage-list"></div>
+
+      <table class="item-table">
+        <thead>
+          <tr>
+            <th>Name</th>
+            <th>Category</th>
+            <th>Subcategory</th>
+            <th>HSN</th>
+            <th>GST %</th>
+            <th>Price</th>
+            <th>Status</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody id="item-table-body"></tbody>
+      </table>
+    </section>
+  </main>
+
+  <!-- ===================== SETTINGS VIEW ===================== -->
+  <main id="view-settings" class="view hidden">
+    <section class="menu-manage">
+      <div class="manage-head">
+        <h2>Settings</h2>
+      </div>
+
+      <div class="settings-section">
+        <h3>Business details</h3>
+        <p class="settings-hint">Printed on every receipt.</p>
+        <div class="settings-grid">
+          <label class="context-field">
+            <span>Business name</span>
+            <input id="settings-business-name" type="text" placeholder="e.g. Quality Foods" />
+          </label>
+          <label class="context-field">
+            <span>Phone</span>
+            <input id="settings-business-phone" type="text" placeholder="e.g. 9895705216, 7593899506" />
+          </label>
+          <label class="context-field settings-field-wide">
+            <span>Address</span>
+            <input id="settings-business-address" type="text" placeholder="e.g. H.M.T Junction, Opp. Polytechnic" />
+          </label>
+          <label class="context-field">
+            <span>GSTIN</span>
+            <input id="settings-gstin" type="text" placeholder="e.g. 32AAAFQ3193L1Z6" />
+          </label>
+          <label class="context-field">
+            <span>FSSAI No</span>
+            <input id="settings-fssai" type="text" placeholder="e.g. 11317007000946" />
+          </label>
+        </div>
+      </div>
+
+      <div class="settings-section">
+        <h3>Billing</h3>
+        <div class="settings-grid">
+          <label class="context-field">
+            <span>Default GST % for new items</span>
+            <input id="settings-tax-input" type="number" min="0" step="0.5" />
+          </label>
+          <label class="context-field">
+            <span>Invoice number prefix</span>
+            <input id="settings-invoice-prefix" type="text" placeholder="e.g. INV" />
+          </label>
+          <label class="context-field">
+            <span>UPI ID (for Scan &amp; Pay QR)</span>
+            <input id="settings-upi-id" type="text" placeholder="e.g. yourshop@upi" />
+          </label>
+          <label class="context-field settings-field-wide">
+            <span>Receipt footer note</span>
+            <input id="settings-footer-note" type="text" placeholder="e.g. Thank you, please visit again!" />
+          </label>
+        </div>
+      </div>
+
+      <div class="settings-section">
+        <h3>Delivery platforms</h3>
+        <p class="settings-hint">Zomato doesn't offer an open API for automatic order sync — that requires their formal POS Partner program. For now, key in Zomato orders manually on the Take Order screen using the "Source" field; they'll show up in Orders and Reports tagged as Zomato. Your restaurant ID below is just for your own reference when reconciling against Zomato's dashboard.</p>
+        <div class="settings-grid">
+          <label class="context-field">
+            <span>Zomato Restaurant ID</span>
+            <input id="settings-zomato-id" type="text" placeholder="e.g. 19887456" />
+          </label>
+        </div>
+      </div>
+
+      <button id="settings-save-btn" class="btn btn-ghost">Save settings</button>
+      <p class="settings-hint">The GST % applies to new menu items going forward — existing items keep their own rate. Invoice numbers reset each financial year (Apr–Mar). None of this affects orders already open.</p>
+    </section>
+  </main>
+
+</div>
+
+<!-- ===================== Item edit modal ===================== -->
+<div id="item-modal" class="modal-backdrop hidden">
+  <div class="modal">
+    <h3 id="item-modal-title">Add menu item</h3>
+    <label class="modal-field"><span>Name</span><input id="item-name" type="text" /></label>
+    <label class="modal-field"><span>Price</span><input id="item-price" type="number" min="0" step="0.01" /></label>
+    <label class="modal-field">
+      <span>Category</span>
+      <select id="item-category"></select>
+    </label>
+    <label class="modal-field">
+      <span>Subcategory</span>
+      <select id="item-subcategory"></select>
+    </label>
+    <label class="modal-field"><span>HSN code</span><input id="item-hsn-code" type="text" placeholder="e.g. 21069099" /></label>
+    <label class="modal-field"><span>GST %</span><input id="item-gst-rate" type="number" min="0" step="0.5" /></label>
+    <label class="modal-field checkbox-field">
+      <input id="item-available" type="checkbox" checked />
+      <span>Available</span>
+    </label>
+    <div class="modal-actions">
+      <button id="item-cancel-btn" class="btn btn-ghost">Cancel</button>
+      <button id="item-save-btn" class="btn btn-primary">Save</button>
+    </div>
+  </div>
+</div>
+
+<!-- ===================== Payment / receipt modal ===================== -->
+<div id="payment-modal" class="modal-backdrop hidden">
+  <div class="modal">
+    <h3>Take payment</h3>
+    <p class="modal-total">Total due: <strong id="payment-total">0.00</strong></p>
+    <div class="payment-modes">
+      <button class="btn btn-ghost payment-mode-btn" data-mode="cash">Cash</button>
+      <button class="btn btn-ghost payment-mode-btn" data-mode="card">Card</button>
+      <button class="btn btn-ghost payment-mode-btn" data-mode="upi">UPI</button>
+    </div>
+    <div class="modal-actions">
+      <button id="payment-cancel-btn" class="btn btn-ghost">Back</button>
+    </div>
+  </div>
+</div>
+
+<div id="receipt-modal" class="modal-backdrop hidden">
+  <div class="modal receipt-modal">
+    <h3>Payment received</h3>
+    <div id="receipt-body" class="receipt-body"></div>
+    <div class="modal-actions">
+      <button id="receipt-print-btn" class="btn btn-ghost">Print</button>
+      <button id="receipt-close-btn" class="btn btn-primary btn-block">New order</button>
+    </div>
+  </div>
+</div>
+
+<script src="renderer.js"></script>
+</body>
+</html>
