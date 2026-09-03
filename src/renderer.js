@@ -2,6 +2,7 @@
 let categories = [];
 let subcategories = [];
 let menuItems = [];
+let restaurantTables = [];
 let activeCategory = 'all';
 let activeSubcategory = 'all';
 let currentOrder = null; // { id, items: [...], subtotal, tax_amount, discount, total, ... }
@@ -9,18 +10,20 @@ let selectedPaymentMode = null;
 let allOrders = [];
 let ordersStatusFilter = 'all';
 let viewingHistoricalReceipt = false;
+let currentReceiptOrderId = null; // which order the open receipt modal belongs to, for receipt-print-btn
 let reportsRangeKey = 'today';
 let defaultTaxPercent = 5;
 
 const money = (n) => Number(n || 0).toFixed(2);
 
 // ---------------- View switching ----------------
-const VIEWS = ['order', 'orders', 'reports', 'menu', 'settings'];
+const VIEWS = ['order', 'tables', 'orders', 'reports', 'menu', 'settings'];
 
 function switchToView(view) {
   document.querySelectorAll('.tab-btn').forEach((b) => b.classList.toggle('active', b.dataset.view === view));
   VIEWS.forEach((v) => document.getElementById(`view-${v}`).classList.toggle('hidden', v !== view));
   if (view === 'menu') renderItemTable();
+  if (view === 'tables') loadTables();
   if (view === 'orders') loadOrdersList();
   if (view === 'reports') loadReports();
   if (view === 'settings') loadSettings();
@@ -292,22 +295,30 @@ document.getElementById('cancel-order-btn').addEventListener('click', async () =
     ? `Cancel order #${currentOrder.id}? It has ${itemCount} item(s) on it — this can't be undone.`
     : `Cancel order #${currentOrder.id}?`;
   if (!confirm(warning)) return;
-  await window.pos.orders.cancel(currentOrder.id);
-  currentOrder = null;
-  document.getElementById('table-label').value = '';
-  renderTicket();
+  try {
+    await window.pos.orders.cancel(currentOrder.id);
+    currentOrder = null;
+    document.getElementById('table-label').value = '';
+    renderTicket();
+  } catch (err) {
+    alert(`Could not cancel order: ${err.message}`);
+  }
 });
 
 async function addItemToOrder(menuItem) {
   await ensureOrder();
-  const updatedOrder = await window.pos.orders.addItem({
-    orderId: currentOrder.id,
-    menuItemId: menuItem.id,
-    name: menuItem.name,
-    price: menuItem.price,
-    quantity: 1,
-  });
-  await refreshCurrentOrder(updatedOrder);
+  try {
+    const updatedOrder = await window.pos.orders.addItem({
+      orderId: currentOrder.id,
+      menuItemId: menuItem.id,
+      name: menuItem.name,
+      price: menuItem.price,
+      quantity: 1,
+    });
+    await refreshCurrentOrder(updatedOrder);
+  } catch (err) {
+    alert(`Could not add item: ${err.message}`);
+  }
 }
 
 async function refreshCurrentOrder(orderHeader) {
@@ -372,10 +383,14 @@ function setTotals(subtotal, tax, discount, total) {
 }
 
 async function changeQty(line, newQty) {
-  const updated = await window.pos.orders.updateItemQty({
-    orderItemId: line.id, quantity: newQty, orderId: currentOrder.id,
-  });
-  await refreshCurrentOrder(updated);
+  try {
+    const updated = await window.pos.orders.updateItemQty({
+      orderItemId: line.id, quantity: newQty, orderId: currentOrder.id,
+    });
+    await refreshCurrentOrder(updated);
+  } catch (err) {
+    alert(`Could not update quantity: ${err.message}`);
+  }
 }
 
 document.getElementById('discount-input').addEventListener('change', async (e) => {
@@ -383,6 +398,110 @@ document.getElementById('discount-input').addEventListener('change', async (e) =
   const updated = await window.pos.orders.setDiscount({ orderId: currentOrder.id, discount: Number(e.target.value) });
   await refreshCurrentOrder(updated);
 });
+
+// ---------------- Tables ----------------
+async function loadTables() {
+  restaurantTables = await window.pos.tables.list();
+  renderTablesGrid();
+  renderTableManageList();
+}
+
+function minutesSince(timestamp) {
+  if (!timestamp) return 0;
+  const then = new Date(timestamp.replace(' ', 'T') + 'Z').getTime();
+  return Math.max(0, Math.round((Date.now() - then) / 60000));
+}
+
+function renderTablesGrid() {
+  const grid = document.getElementById('tables-grid');
+  grid.innerHTML = '';
+  if (!restaurantTables.length) {
+    grid.innerHTML = '<p class="ticket-empty">No tables yet — add one above.</p>';
+    return;
+  }
+  restaurantTables.forEach((t) => {
+    const occupied = !!t.order_id;
+    const tile = document.createElement('button');
+    tile.className = 'menu-tile';
+    tile.innerHTML = `
+      <span class="menu-tile-name">${escapeHtml(t.name)}</span>
+      ${t.seats ? `<span class="table-tile-meta">${t.seats} pax</span>` : ''}
+      ${occupied
+        ? `<span class="status-pill open">Occupied</span><span class="menu-tile-price">₹${money(t.order_total)}</span><span class="table-tile-meta">${minutesSince(t.order_created_at)} min</span>`
+        : `<span class="status-pill available">Free</span>`}
+    `;
+    tile.addEventListener('click', () => {
+      if (occupied) {
+        resumeOrder(t.order_id);
+      } else {
+        startOrderForTable(t);
+      }
+    });
+    grid.appendChild(tile);
+  });
+}
+
+function renderTableManageList() {
+  const wrap = document.getElementById('table-manage-list');
+  wrap.innerHTML = '';
+  if (!restaurantTables.length) return;
+  restaurantTables.forEach((t) => {
+    const row = document.createElement('div');
+    row.className = 'category-manage-row';
+    row.innerHTML = `
+      <span class="category-manage-name">${escapeHtml(t.name)}${t.seats ? ` · ${t.seats} pax` : ''}</span>
+      <button class="link-btn danger" data-action="delete-table" data-id="${t.id}">Delete</button>
+    `;
+    row.querySelector('[data-action="delete-table"]').addEventListener('click', async () => {
+      if (!confirm(`Delete table "${t.name}"?`)) return;
+      try {
+        await window.pos.tables.delete(t.id);
+        await loadTables();
+      } catch (err) {
+        alert(`Could not delete table: ${err.message}`);
+      }
+    });
+    wrap.appendChild(row);
+  });
+}
+
+document.getElementById('add-table-btn').addEventListener('click', async () => {
+  const nameInput = document.getElementById('new-table-name');
+  const seatsInput = document.getElementById('new-table-seats');
+  const name = nameInput.value.trim();
+  if (!name) return;
+  const seats = seatsInput.value ? Number(seatsInput.value) : null;
+  try {
+    await window.pos.tables.add({ name, seats });
+    nameInput.value = '';
+    seatsInput.value = '';
+    await loadTables();
+  } catch (err) {
+    alert(`Could not add table: ${err.message}`);
+  }
+});
+
+async function startOrderForTable(table) {
+  if (currentOrder && currentOrder.items && currentOrder.items.length > 0) {
+    const label = currentOrder.table_label ? ` (${currentOrder.table_label})` : '';
+    const proceed = confirm(
+      `Order #${currentOrder.id}${label} is still open with items in it. Start table "${table.name}" as a separate new order?\n\nThe current one stays open — resume it later from the Orders tab.`
+    );
+    if (!proceed) return;
+  }
+  try {
+    const order = await window.pos.orders.create({ orderType: 'dine-in', tableId: table.id, source: 'in-house' });
+    order.items = [];
+    currentOrder = order;
+    document.getElementById('order-type').value = 'dine-in';
+    document.getElementById('table-label').value = table.name;
+    document.getElementById('order-source').value = 'in-house';
+    renderTicket();
+    switchToView('order');
+  } catch (err) {
+    alert(`Could not start order: ${err.message}`);
+  }
+}
 
 // ---------------- Orders list ----------------
 const ORDER_STATUSES = [
@@ -454,12 +573,16 @@ function renderOrdersTable() {
       cancelBtn.textContent = 'Cancel';
       cancelBtn.addEventListener('click', async () => {
         if (!confirm(`Cancel order #${o.id}? This can't be undone.`)) return;
-        await window.pos.orders.cancel(o.id);
-        if (currentOrder && currentOrder.id === o.id) {
-          currentOrder = null;
-          renderTicket();
+        try {
+          await window.pos.orders.cancel(o.id);
+          if (currentOrder && currentOrder.id === o.id) {
+            currentOrder = null;
+            renderTicket();
+          }
+          await loadOrdersList();
+        } catch (err) {
+          alert(`Could not cancel order: ${err.message}`);
         }
-        await loadOrdersList();
       });
       actionsCell.appendChild(cancelBtn);
     } else if (o.status === 'paid') {
@@ -623,6 +746,7 @@ async function loadReports() {
 
 async function viewReceipt(orderId) {
   viewingHistoricalReceipt = true;
+  currentReceiptOrderId = orderId;
   const receipt = await window.pos.billing.getReceipt(orderId);
   renderReceipt(receipt);
   document.getElementById('receipt-close-btn').textContent = 'Close';
@@ -645,21 +769,31 @@ document.getElementById('payment-cancel-btn').addEventListener('click', () => {
 
 document.querySelectorAll('.payment-mode-btn').forEach((btn) => {
   btn.addEventListener('click', async () => {
-    document.querySelectorAll('.payment-mode-btn').forEach((b) => b.classList.remove('selected'));
+    const allModeBtns = document.querySelectorAll('.payment-mode-btn');
+    allModeBtns.forEach((b) => { b.classList.remove('selected'); b.disabled = true; });
     btn.classList.add('selected');
     selectedPaymentMode = btn.dataset.mode;
-    await finalizeOrder();
+    try {
+      await finalizeOrder();
+    } finally {
+      allModeBtns.forEach((b) => { b.disabled = false; });
+    }
   });
 });
 
 async function finalizeOrder() {
   viewingHistoricalReceipt = false;
-  await window.pos.billing.finalize({ orderId: currentOrder.id, paymentMode: selectedPaymentMode });
-  const receipt = await window.pos.billing.getReceipt(currentOrder.id);
-  renderReceipt(receipt);
-  document.getElementById('receipt-close-btn').textContent = 'New order';
-  paymentModal.classList.add('hidden');
-  receiptModal.classList.remove('hidden');
+  try {
+    await window.pos.billing.finalize({ orderId: currentOrder.id, paymentMode: selectedPaymentMode });
+    currentReceiptOrderId = currentOrder.id;
+    const receipt = await window.pos.billing.getReceipt(currentOrder.id);
+    renderReceipt(receipt);
+    document.getElementById('receipt-close-btn').textContent = 'New order';
+    paymentModal.classList.add('hidden');
+    receiptModal.classList.remove('hidden');
+  } catch (err) {
+    alert(`Could not charge order: ${err.message}`);
+  }
 }
 
 function renderReceipt(order) {
@@ -741,8 +875,19 @@ function renderReceipt(order) {
   body.innerHTML = headerHtml + metaHtml + itemsHtml + totalsHtml + gstHtml + paymentHtml + qrHtml + footerHtml;
 }
 
-document.getElementById('receipt-print-btn').addEventListener('click', () => {
-  window.print();
+document.getElementById('receipt-print-btn').addEventListener('click', async () => {
+  try {
+    const result = await window.pos.receipt.print({ orderId: currentReceiptOrderId });
+    // 'dialog' (the default/unset printer_mode) means the backend did nothing
+    // and the renderer must fall back to window.print() itself — exactly as
+    // before this feature existed, so every install with no printer
+    // configured yet keeps behaving identically.
+    if (result.mode === 'dialog') {
+      window.print();
+    }
+  } catch (err) {
+    alert(`Could not print: ${err.message}`);
+  }
 });
 
 document.getElementById('receipt-close-btn').addEventListener('click', () => {
@@ -852,7 +997,80 @@ async function loadSettings() {
   document.getElementById('settings-upi-id').value = settings.upiId;
   document.getElementById('settings-footer-note').value = settings.footerNote;
   document.getElementById('settings-zomato-id').value = settings.zomatoRestaurantId;
+
+  document.getElementById('settings-printer-mode').value = settings.printerMode;
+  document.getElementById('settings-printer-paper-width').value = settings.printerPaperWidth;
+  document.getElementById('settings-printer-network-host').value = settings.printerNetworkHost;
+  document.getElementById('settings-printer-network-port').value = settings.printerNetworkPort;
+  await loadSystemPrinters(settings.printerSystemName);
+  updatePrinterModeVisibility();
 }
+
+// Populates the system-printer <select> from printers:listSystem. Pass
+// `selectedName` (the saved settings value) on initial load; omit it (e.g.
+// from the Refresh button) to keep whatever is currently selected.
+async function loadSystemPrinters(selectedName) {
+  const select = document.getElementById('settings-printer-system-name');
+  const wanted = selectedName !== undefined ? selectedName : select.value;
+  select.innerHTML = '';
+  try {
+    const printers = await window.pos.printers.listSystem();
+    if (!printers.length) {
+      const opt = document.createElement('option');
+      opt.value = '';
+      opt.textContent = 'No printers found';
+      select.appendChild(opt);
+    } else {
+      printers.forEach((p) => {
+        const opt = document.createElement('option');
+        opt.value = p.name;
+        opt.textContent = p.displayName || p.name;
+        if (p.isDefault) opt.textContent += ' (default)';
+        select.appendChild(opt);
+      });
+    }
+    if (wanted && ![...select.options].some((o) => o.value === wanted)) {
+      // Saved printer isn't currently detected (unplugged, renamed, etc.) —
+      // keep it selectable rather than silently swapping the saved setting.
+      const opt = document.createElement('option');
+      opt.value = wanted;
+      opt.textContent = `${wanted} (not currently detected)`;
+      select.appendChild(opt);
+    }
+    if (wanted) select.value = wanted;
+  } catch (err) {
+    const opt = document.createElement('option');
+    opt.value = '';
+    opt.textContent = 'Could not list printers';
+    select.appendChild(opt);
+  }
+}
+
+document.getElementById('settings-printer-refresh-btn').addEventListener('click', () => {
+  loadSystemPrinters();
+});
+
+function updatePrinterModeVisibility() {
+  const mode = document.getElementById('settings-printer-mode').value;
+  document.getElementById('settings-printer-system-block').classList.toggle('hidden', mode !== 'system');
+  document.getElementById('settings-printer-network-block').classList.toggle('hidden', mode !== 'network');
+  document.getElementById('settings-printer-test-btn').disabled = mode === 'dialog';
+}
+
+document.getElementById('settings-printer-mode').addEventListener('change', updatePrinterModeVisibility);
+
+document.getElementById('settings-printer-test-btn').addEventListener('click', async () => {
+  const btn = document.getElementById('settings-printer-test-btn');
+  btn.disabled = true;
+  try {
+    await window.pos.receipt.testPrint();
+    alert('Test print sent.');
+  } catch (err) {
+    alert(`Test print failed: ${err.message}`);
+  } finally {
+    btn.disabled = document.getElementById('settings-printer-mode').value === 'dialog';
+  }
+});
 
 document.getElementById('settings-save-btn').addEventListener('click', async () => {
   const btn = document.getElementById('settings-save-btn');
@@ -875,6 +1093,11 @@ document.getElementById('settings-save-btn').addEventListener('click', async () 
       upiId: document.getElementById('settings-upi-id').value.trim(),
       footerNote: document.getElementById('settings-footer-note').value.trim(),
       zomatoRestaurantId: document.getElementById('settings-zomato-id').value.trim(),
+      printerMode: document.getElementById('settings-printer-mode').value,
+      printerPaperWidth: document.getElementById('settings-printer-paper-width').value,
+      printerSystemName: document.getElementById('settings-printer-system-name').value.trim(),
+      printerNetworkHost: document.getElementById('settings-printer-network-host').value.trim(),
+      printerNetworkPort: Number(document.getElementById('settings-printer-network-port').value) || 9100,
     });
     defaultTaxPercent = defaultTaxValue;
     btn.textContent = 'Saved';

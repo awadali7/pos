@@ -11,6 +11,11 @@ contextBridge.exposeInMainWorld('pos', {
     add: (payload) => ipcRenderer.invoke('subcategories:add', payload),
     delete: (id) => ipcRenderer.invoke('subcategories:delete', id),
   },
+  tables: {
+    list: () => ipcRenderer.invoke('tables:list'),
+    add: (payload) => ipcRenderer.invoke('tables:add', payload),
+    delete: (id) => ipcRenderer.invoke('tables:delete', id),
+  },
   menu: {
     list: () => ipcRenderer.invoke('menu:list'),
     add: (item) => ipcRenderer.invoke('menu:add', item),
@@ -33,6 +38,13 @@ contextBridge.exposeInMainWorld('pos', {
   billing: {
     finalize: (payload) => ipcRenderer.invoke('billing:finalize', payload),
     getReceipt: (orderId) => ipcRenderer.invoke('billing:getReceipt', orderId),
+  },
+  printers: {
+    listSystem: () => ipcRenderer.invoke('printers:listSystem'),
+  },
+  receipt: {
+    print: (payload) => ipcRenderer.invoke('receipt:print', payload),
+    testPrint: () => ipcRenderer.invoke('receipt:testPrint'),
   },
   reports: {
     summary: (payload) => ipcRenderer.invoke('reports:summary', payload),

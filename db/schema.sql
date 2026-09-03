@@ -27,10 +27,18 @@ CREATE TABLE IF NOT EXISTS menu_items (
     created_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE IF NOT EXISTS restaurant_tables (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    name        TEXT NOT NULL UNIQUE,
+    seats       INTEGER,
+    sort_order  INTEGER NOT NULL DEFAULT 0
+);
+
 CREATE TABLE IF NOT EXISTS orders (
     id             INTEGER PRIMARY KEY AUTOINCREMENT,
     order_type     TEXT NOT NULL DEFAULT 'dine-in' CHECK (order_type IN ('dine-in', 'takeaway', 'delivery')),
     table_label    TEXT,                          -- free-text table name/number, optional
+    table_id       INTEGER REFERENCES restaurant_tables(id) ON DELETE SET NULL,
     source         TEXT NOT NULL DEFAULT 'in-house' CHECK (source IN ('in-house', 'zomato')),
     status         TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'paid', 'cancelled')),
     subtotal       NUMERIC(10, 2) NOT NULL DEFAULT 0,
@@ -67,9 +75,16 @@ CREATE INDEX IF NOT EXISTS idx_menu_items_category ON menu_items(category_id);
 CREATE INDEX IF NOT EXISTS idx_menu_items_subcategory ON menu_items(subcategory_id);
 CREATE INDEX IF NOT EXISTS idx_subcategories_category ON subcategories(category_id);
 CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status);
+-- idx_orders_table_id is created in db.js, after the table_id column has been
+-- backfilled onto pre-existing installs (this file's CREATE TABLE IF NOT EXISTS
+-- is a no-op against an orders table that already existed without it).
 
 INSERT INTO settings (key, value) VALUES ('default_tax_percent', '5')
 ON CONFLICT (key) DO NOTHING;
+
+INSERT INTO restaurant_tables (name, seats, sort_order) VALUES
+    ('T1', 4, 1), ('T2', 4, 2), ('T3', 2, 3), ('T4', 6, 4)
+ON CONFLICT (name) DO NOTHING;
 
 -- Seed a few starter categories + items so the app isn't empty on first run.
 -- Every INSERT below is written to be a no-op on repeat runs, since this file

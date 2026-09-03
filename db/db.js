@@ -33,5 +33,7 @@ ensureColumn('order_items', 'gst_rate', 'NUMERIC(5,2) NOT NULL DEFAULT 0');
 ensureColumn('order_items', 'tax_amount', 'NUMERIC(10,2) NOT NULL DEFAULT 0');
 ensureColumn('orders', 'invoice_number', 'TEXT');
 ensureColumn('orders', 'source', "TEXT NOT NULL DEFAULT 'in-house'");
+ensureColumn('orders', 'table_id', 'INTEGER REFERENCES restaurant_tables(id)');
+db.exec('CREATE INDEX IF NOT EXISTS idx_orders_table_id ON orders(table_id)');
 
 module.exports = db;

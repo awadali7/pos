@@ -10,9 +10,11 @@ created automatically the first time the app runs.
 
 - **Menu management** — add, edit, delete items; toggle available/unavailable; organize by category
 - **Take order** — tap items into a running ticket, adjust quantity, add a discount and tax %, dine-in/takeaway/delivery + table label
+- **Table layout** — a grid of tables (add/remove your own, with optional seat counts); tap a free one to start its order, tap an occupied one to resume it, freed automatically once it's paid or cancelled
 - **Billing** — charge the ticket (cash/card/UPI), see a receipt, close out the order
+- **Reports** — revenue/order KPIs, top items, sales by category, date-range filtering, Excel export
 
-Table layout, kitchen display, and sales reports were left out of this v1 on purpose — say the word if you want any of those added next.
+Kitchen display was left out of this v1 on purpose — say the word if you want it added next.
 
 ## 1. Prerequisites
 

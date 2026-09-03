@@ -205,6 +205,10 @@ button, input, select {
   color: var(--copper);
   font-size: 13px;
 }
+.table-tile-meta {
+  font-size: 12px;
+  color: var(--text-on-ink-dim);
+}
 
 /* ---------------- Ticket pane ---------------- */
 .ticket-pane {
