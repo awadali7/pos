@@ -108,6 +108,13 @@ function formatDate(timestamp) {
   }
 }
 
+// Shared with main.js's payment-breakdown text (see buildReceiptHtml there)
+// so "cash"/"card"/"upi" render as "Cash"/"Card"/"Upi" in exactly one place
+// instead of each caller re-implementing the same one-liner.
+function capitalize(s) {
+  return s.charAt(0).toUpperCase() + s.slice(1);
+}
+
 // ---------- Full receipt builder ----------
 // Mirrors renderReceipt() in src/renderer.js content-for-content (business
 // header, invoice/order #, date, order type + table, items table, totals,
@@ -117,7 +124,7 @@ function formatDate(timestamp) {
 // without a special code page), and the UPI QR code is omitted — rendering
 // a raster image via ESC/POS (GS v 0 and friends) is meaningfully bigger
 // scope than plain text and is left for a future enhancement.
-function buildReceiptBuffer({ business = {}, order = {}, items = [], gstBreakdown = [], paperWidthMm } = {}) {
+function buildReceiptBuffer({ business = {}, order = {}, items = [], gstBreakdown = [], payments = [], paperWidthMm } = {}) {
   const layout = getLayout(paperWidthMm);
   const W = layout.width;
   const rule = '-'.repeat(W);
@@ -164,6 +171,8 @@ function buildReceiptBuffer({ business = {}, order = {}, items = [], gstBreakdow
       { text: money(rate), width: ic.rate, align: 'right' },
       { text: money(rate * qty), width: ic.amt, align: 'right' },
     ]) + LF;
+    const modNames = (i.modifiers || []).map((m) => m.name).join(', ');
+    if (modNames) out += '  ' + modNames + LF;
   });
   out += rule + LF;
 
@@ -198,8 +207,13 @@ function buildReceiptBuffer({ business = {}, order = {}, items = [], gstBreakdow
     out += rule + LF;
   }
 
-  // Payment mode.
-  if (order.payment_mode) {
+  // Payment mode — a breakdown line per tender for a split payment (more
+  // than one row in `payments`), the plain single-mode line otherwise
+  // (unchanged, and the only option for a paid order predating this
+  // feature, which has no order_payments rows at all).
+  if (payments.length > 1) {
+    out += 'Paid via: ' + payments.map((p) => `${capitalize(p.mode)} Rs.${money(p.amount)}`).join(', ') + LF;
+  } else if (order.payment_mode) {
     out += 'Paid via ' + order.payment_mode + LF;
   }
 
@@ -216,6 +230,42 @@ function buildReceiptBuffer({ business = {}, order = {}, items = [], gstBreakdow
   return textToBuffer(out);
 }
 
+// ---------- Kitchen Order Ticket builder ----------
+// Kitchen-facing ticket: item name + qty (bold, large) and notes only — no
+// prices, no GST. Deliberately separate from buildReceiptBuffer() above:
+// the kitchen needs to read this from across a pass-through window, and
+// showing prices there would leak pricing info to kitchen staff. Caller is
+// responsible for passing only the order_items that haven't been fired yet
+// (see receipt:printKot in main.js) so re-firing an order only sends what's
+// new since the last ticket.
+function buildKotBuffer({ order = {}, items = [], paperWidthMm } = {}) {
+  const layout = getLayout(paperWidthMm);
+  const W = layout.width;
+  const rule = '-'.repeat(W);
+
+  let out = INIT;
+  out += ALIGN_CENTER + BOLD_ON + 'KITCHEN ORDER TICKET' + LF + BOLD_OFF;
+  const typeValue = (order.order_type || '') + (order.table_label ? ' - ' + order.table_label : '');
+  if (typeValue.trim()) out += typeValue + LF;
+  if (order.id != null) out += 'Order #' + String(order.id) + LF;
+  out += new Date().toLocaleString() + LF;
+  out += ALIGN_LEFT + rule + LF;
+
+  items.forEach((i) => {
+    const qty = Number(i.quantity) || 0;
+    out += BOLD_ON + tableRow([
+      { text: i.item_name, width: W - 5 },
+      { text: 'x' + String(qty), width: 4, align: 'right' },
+    ]) + LF + BOLD_OFF;
+    const modNames = (i.modifiers || []).map((m) => m.name).join(', ');
+    if (modNames) out += '  ' + modNames + LF;
+    if (i.notes) out += '  ' + i.notes + LF;
+  });
+  out += rule + LF + LF + LF + CUT;
+
+  return textToBuffer(out);
+}
+
 module.exports = {
   INIT,
   ALIGN_LEFT,
@@ -226,5 +276,7 @@ module.exports = {
   LF,
   CUT,
   getLayout,
+  capitalize,
   buildReceiptBuffer,
+  buildKotBuffer,
 };

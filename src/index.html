@@ -25,6 +25,14 @@
       <button class="tab-btn" data-view="settings">Settings</button>
     </nav>
     <div class="topbar-spacer"></div>
+    <div id="topbar-shift-info" class="topbar-shift-info hidden">
+      <span id="topbar-shift-status" class="topbar-shift-status"></span>
+      <button id="shift-action-btn" class="btn btn-ghost" type="button">Start Shift</button>
+    </div>
+    <div id="topbar-staff-info" class="topbar-staff-info hidden">
+      <span id="topbar-staff-name" class="topbar-staff-name"></span>
+      <button id="lock-btn" class="btn btn-ghost" type="button">Lock</button>
+    </div>
   </header>
 
   <!-- ===================== TAKE ORDER VIEW ===================== -->
@@ -72,6 +80,8 @@
         <div id="ticket-items" class="ticket-items">
           <p class="ticket-empty">No items yet. Tap a dish to add it.</p>
         </div>
+
+        <button id="kot-print-btn" class="btn btn-ghost btn-block" disabled>Send to Kitchen</button>
 
         <div class="ticket-adjust">
           <label>
@@ -127,7 +137,10 @@
         <h2>Orders</h2>
       </div>
 
-      <div id="orders-filter" class="category-tabs"></div>
+      <div class="orders-toolbar">
+        <div id="orders-filter" class="category-tabs"></div>
+        <input id="orders-customer-search" type="text" placeholder="Search by customer phone" class="orders-customer-search" />
+      </div>
 
       <table class="item-table">
         <thead>
@@ -135,6 +148,7 @@
             <th>#</th>
             <th>Type</th>
             <th>Table / ref</th>
+            <th>Customer</th>
             <th>Source</th>
             <th>Status</th>
             <th>Total</th>
@@ -179,6 +193,30 @@
         <div class="reports-panel">
           <h3>By category</h3>
           <div id="reports-by-category" class="bar-list"></div>
+        </div>
+      </div>
+
+      <div class="reports-panel reports-shift-panel">
+        <h3>Shift history</h3>
+        <div class="table-scroll">
+          <table class="item-table">
+            <thead>
+              <tr>
+                <th>Opened</th>
+                <th>Closed</th>
+                <th>Opened by</th>
+                <th>Closed by</th>
+                <th>Float</th>
+                <th>Cash</th>
+                <th>Card</th>
+                <th>UPI</th>
+                <th>Expected</th>
+                <th>Counted</th>
+                <th>Diff</th>
+              </tr>
+            </thead>
+            <tbody id="shift-history-body"></tbody>
+          </table>
         </div>
       </div>
     </section>
@@ -282,8 +320,8 @@
         <h3>Billing</h3>
         <div class="settings-grid">
           <label class="context-field">
-            <span>Default GST % for new items</span>
-            <input id="settings-tax-input" type="number" min="0" step="0.5" />
+            <span>Default GST % for new items *</span>
+            <input id="settings-tax-input" type="number" min="0" step="0.5" required />
           </label>
           <label class="context-field">
             <span>Invoice number prefix</span>
@@ -356,6 +394,29 @@
         <button id="settings-printer-test-btn" type="button" class="btn btn-ghost" disabled>Test print</button>
       </div>
 
+      <div class="settings-section">
+        <h3>Staff accounts</h3>
+        <p class="settings-hint">Owner can do anything. Manager can edit the menu and view reports, but not touch Settings or Staff accounts. Staff is order-taking only — no Menu, Settings, Reports, or Staff access.</p>
+
+        <div id="staff-manage-list" class="category-manage-list"></div>
+
+        <div class="category-manage">
+          <div class="category-manage-group">
+            <label class="context-field"><span>Name</span><input id="new-staff-name" type="text" /></label>
+            <label class="context-field"><span>PIN (4-6 digits)</span><input id="new-staff-pin" type="password" inputmode="numeric" maxlength="6" /></label>
+            <label class="context-field">
+              <span>Role</span>
+              <select id="new-staff-role">
+                <option value="staff">Staff</option>
+                <option value="manager">Manager</option>
+                <option value="owner">Owner</option>
+              </select>
+            </label>
+            <button id="add-staff-btn" class="btn btn-ghost">Add staff</button>
+          </div>
+        </div>
+      </div>
+
       <button id="settings-save-btn" class="btn btn-ghost">Save settings</button>
       <p class="settings-hint">The GST % applies to new menu items going forward — existing items keep their own rate. Invoice numbers reset each financial year (Apr–Mar). None of this affects orders already open.</p>
     </section>
@@ -390,16 +451,98 @@
   </div>
 </div>
 
+<!-- ===================== Item modifier picker (Take Order) ===================== -->
+<div id="item-modifier-picker-modal" class="modal-backdrop hidden">
+  <div class="modal">
+    <h3 id="item-modifier-picker-title">Choose options</h3>
+    <div id="item-modifier-picker-groups"></div>
+    <div class="modal-actions">
+      <button id="item-modifier-picker-cancel-btn" class="btn btn-ghost">Cancel</button>
+      <button id="item-modifier-picker-add-btn" class="btn btn-primary">Add to order</button>
+    </div>
+  </div>
+</div>
+
+<!-- ===================== Item modifier management (Menu) ===================== -->
+<div id="item-modifier-manage-modal" class="modal-backdrop hidden">
+  <div class="modal">
+    <h3 id="item-modifier-manage-title">Modifiers</h3>
+    <div id="item-modifier-manage-groups"></div>
+    <div class="modifier-new-group-form">
+      <div class="modifier-new-group-fields">
+        <label class="context-field">
+          <span>New group</span>
+          <input id="new-modifier-group-name" type="text" placeholder="e.g. Size" />
+        </label>
+        <label class="context-field">
+          <span>Min select</span>
+          <input id="new-modifier-group-min" type="number" min="0" step="1" value="0" />
+        </label>
+        <label class="context-field">
+          <span>Max select</span>
+          <input id="new-modifier-group-max" type="number" min="1" step="1" value="1" />
+        </label>
+      </div>
+      <button id="add-modifier-group-btn" class="btn btn-ghost btn-block">Add group</button>
+    </div>
+    <div class="modal-actions">
+      <button id="item-modifier-manage-close-btn" class="btn btn-primary btn-block">Done</button>
+    </div>
+  </div>
+</div>
+
+<!-- ===================== Staff PIN reset ===================== -->
+<!-- A modal, not window.prompt() — Electron doesn't implement prompt() the
+     way it does alert()/confirm(), so a prompt() call here would silently
+     do nothing. -->
+<div id="staff-pin-modal" class="modal-backdrop hidden">
+  <div class="modal">
+    <h3 id="staff-pin-modal-title">Reset PIN</h3>
+    <label class="modal-field"><span>New PIN (4-6 digits)</span><input id="staff-pin-new" type="password" inputmode="numeric" maxlength="6" /></label>
+    <label class="modal-field"><span>Confirm PIN</span><input id="staff-pin-confirm" type="password" inputmode="numeric" maxlength="6" /></label>
+    <p id="staff-pin-error" class="auth-error hidden"></p>
+    <div class="modal-actions">
+      <button id="staff-pin-cancel-btn" class="btn btn-ghost">Cancel</button>
+      <button id="staff-pin-save-btn" class="btn btn-primary">Save PIN</button>
+    </div>
+  </div>
+</div>
+
 <!-- ===================== Payment / receipt modal ===================== -->
 <div id="payment-modal" class="modal-backdrop hidden">
   <div class="modal">
     <h3>Take payment</h3>
     <p class="modal-total">Total due: <strong id="payment-total">0.00</strong></p>
+
+    <div class="payment-customer">
+      <label class="modal-field"><span>Customer phone (optional)</span><input id="payment-customer-phone" type="text" inputmode="numeric" placeholder="e.g. 9876543210" /></label>
+      <label class="modal-field"><span>Name</span><input id="payment-customer-name" type="text" placeholder="e.g. Priya" /></label>
+      <p id="payment-customer-hint" class="payment-customer-hint hidden"></p>
+    </div>
+
     <div class="payment-modes">
       <button class="btn btn-ghost payment-mode-btn" data-mode="cash">Cash</button>
       <button class="btn btn-ghost payment-mode-btn" data-mode="card">Card</button>
       <button class="btn btn-ghost payment-mode-btn" data-mode="upi">UPI</button>
     </div>
+
+    <button id="split-payment-toggle-btn" type="button" class="link-btn">Split payment instead</button>
+
+    <div id="split-payment-section" class="split-payment hidden">
+      <div class="split-payment-add">
+        <select id="split-payment-mode">
+          <option value="cash">Cash</option>
+          <option value="card">Card</option>
+          <option value="upi">UPI</option>
+        </select>
+        <input id="split-payment-amount" type="number" min="0.01" step="0.01" placeholder="Amount" />
+        <button id="split-payment-add-btn" type="button" class="btn btn-ghost">Add</button>
+      </div>
+      <div id="split-payment-list" class="split-payment-list"></div>
+      <div class="split-payment-remaining">Remaining: <strong id="split-payment-remaining">0.00</strong></div>
+      <button id="split-payment-charge-btn" class="btn btn-primary btn-block" disabled>Charge split payment</button>
+    </div>
+
     <div class="modal-actions">
       <button id="payment-cancel-btn" class="btn btn-ghost">Back</button>
     </div>
@@ -413,6 +556,85 @@
     <div class="modal-actions">
       <button id="receipt-print-btn" class="btn btn-ghost">Print</button>
       <button id="receipt-close-btn" class="btn btn-primary btn-block">New order</button>
+    </div>
+  </div>
+</div>
+
+<!-- ===================== Start Shift ===================== -->
+<div id="shift-open-modal" class="modal-backdrop hidden">
+  <div class="modal">
+    <h3>Start Shift</h3>
+    <label class="modal-field"><span>Opening cash float</span><input id="shift-open-float" type="number" min="0" step="0.01" value="0" /></label>
+    <p id="shift-open-error" class="auth-error hidden"></p>
+    <div class="modal-actions">
+      <button id="shift-open-cancel-btn" class="btn btn-ghost">Cancel</button>
+      <button id="shift-open-confirm-btn" class="btn btn-primary">Start Shift</button>
+    </div>
+  </div>
+</div>
+
+<!-- ===================== Close Shift ===================== -->
+<div id="shift-close-modal" class="modal-backdrop hidden">
+  <div class="modal shift-close-modal">
+    <h3>Close Shift</h3>
+    <div id="shift-close-summary" class="shift-close-summary"></div>
+    <label class="modal-field"><span>Counted cash in drawer</span><input id="shift-close-counted" type="number" min="0" step="0.01" /></label>
+    <p id="shift-close-diff" class="shift-close-diff hidden"></p>
+    <label class="modal-field"><span>Notes (optional)</span><input id="shift-close-notes" type="text" placeholder="e.g. register jammed for 10 min" /></label>
+    <p id="shift-close-error" class="auth-error hidden"></p>
+    <div class="modal-actions">
+      <button id="shift-close-cancel-btn" class="btn btn-ghost">Cancel</button>
+      <button id="shift-close-confirm-btn" class="btn btn-primary">Close Shift</button>
+    </div>
+  </div>
+</div>
+
+<!-- Off-screen print target for KOT dialog-mode printing (printer_mode =
+     'dialog'). Not a modal — never shown on screen, only revealed by the
+     @media print rule in style.css while window.print() runs. -->
+<div id="kot-print-body"></div>
+
+<!-- ===================== Staff login / first-run setup ===================== -->
+<!-- Covers the whole window until a PIN is verified. This is a UX gate only —
+     the real access control is enforced in main.js (requireRole/requireLogin),
+     since a renderer-only lock could be bypassed via DevTools. -->
+<div id="auth-screen" class="auth-screen">
+  <div class="auth-card">
+    <div class="brand auth-brand">
+      <span class="brand-mark">&#9679;</span>
+      <h1>Counter</h1>
+    </div>
+
+    <div id="auth-setup" class="hidden">
+      <h3>Create the owner account</h3>
+      <p class="settings-hint">First run — set up the owner login before continuing. This account can do everything, including adding the rest of your staff later from Settings.</p>
+      <label class="modal-field"><span>Your name</span><input id="setup-name" type="text" /></label>
+      <label class="modal-field"><span>Choose a PIN (4-6 digits)</span><input id="setup-pin" type="password" inputmode="numeric" maxlength="6" /></label>
+      <label class="modal-field"><span>Confirm PIN</span><input id="setup-pin-confirm" type="password" inputmode="numeric" maxlength="6" /></label>
+      <p id="auth-setup-error" class="auth-error hidden"></p>
+      <button id="auth-setup-btn" class="btn btn-primary btn-block">Create account</button>
+    </div>
+
+    <div id="auth-login" class="hidden">
+      <h3>Staff Login</h3>
+      <p class="settings-hint">Enter your PIN.</p>
+      <input id="login-pin" class="auth-pin-display" type="password" inputmode="numeric" maxlength="6" autocomplete="off" />
+      <p id="auth-login-error" class="auth-error hidden"></p>
+      <div class="auth-keypad">
+        <button type="button" class="btn btn-ghost auth-key" data-key="1">1</button>
+        <button type="button" class="btn btn-ghost auth-key" data-key="2">2</button>
+        <button type="button" class="btn btn-ghost auth-key" data-key="3">3</button>
+        <button type="button" class="btn btn-ghost auth-key" data-key="4">4</button>
+        <button type="button" class="btn btn-ghost auth-key" data-key="5">5</button>
+        <button type="button" class="btn btn-ghost auth-key" data-key="6">6</button>
+        <button type="button" class="btn btn-ghost auth-key" data-key="7">7</button>
+        <button type="button" class="btn btn-ghost auth-key" data-key="8">8</button>
+        <button type="button" class="btn btn-ghost auth-key" data-key="9">9</button>
+        <button type="button" class="btn btn-ghost auth-key" data-key="clear">Clear</button>
+        <button type="button" class="btn btn-ghost auth-key" data-key="0">0</button>
+        <button type="button" class="btn btn-ghost auth-key" data-key="back">&larr;</button>
+      </div>
+      <button id="auth-login-btn" class="btn btn-primary btn-block">Log in</button>
     </div>
   </div>
 </div>

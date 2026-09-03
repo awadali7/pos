@@ -1,12 +1,51 @@
 const { app, BrowserWindow, ipcMain, dialog } = require('electron');
 const path = require('path');
 const net = require('net');
+const crypto = require('crypto');
 const ExcelJS = require('exceljs');
 const QRCode = require('qrcode');
 const db = require('./db/db');
 const escpos = require('./printer/escpos');
 
 let mainWindow;
+
+// ---------- Staff session (in-memory, main-process-only) ----------
+// This is deliberately not stored anywhere the renderer can read or set
+// directly — every privileged ipcMain.handle below checks it via
+// requireRole() before doing anything, which is what makes "staff can't
+// touch Menu/Settings" a real restriction rather than just a hidden tab: a
+// staff member opening DevTools and calling window.pos.menu.delete(...)
+// directly would otherwise bypass any renderer-side-only check entirely.
+let currentStaff = null; // { id, name, role } while logged in, else null
+
+function requireRole(...roles) {
+  if (!currentStaff || !roles.includes(currentStaff.role)) {
+    throw new Error('Not authorized for this action');
+  }
+}
+
+function requireLogin() {
+  if (!currentStaff) throw new Error('Not logged in');
+}
+
+// scrypt, not bcrypt — Node's built-in crypto covers this without adding a
+// dependency (this repo has exactly three: better-sqlite3, exceljs,
+// qrcode). Salt is per-staff and random; verifyPin uses a fixed-length,
+// timing-safe comparison rather than ===, since a PIN is compared against
+// attacker-controllable input here (whoever is standing at the terminal).
+function hashPin(pin, salt) {
+  return crypto.scryptSync(String(pin), salt, 64).toString('hex');
+}
+
+function verifyPin(pin, salt, expectedHash) {
+  const actual = Buffer.from(hashPin(pin, salt), 'hex');
+  const expected = Buffer.from(expectedHash, 'hex');
+  return actual.length === expected.length && crypto.timingSafeEqual(actual, expected);
+}
+
+function toStaffView(row) {
+  return { id: row.id, name: row.name, role: row.role, isActive: !!row.is_active };
+}
 
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -94,6 +133,7 @@ function assembleReceiptData(orderId) {
   const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(orderId);
   if (!order) throw new Error('Order not found');
   const items = db.prepare('SELECT * FROM order_items WHERE order_id = ? ORDER BY id').all(orderId);
+  const payments = db.prepare('SELECT mode, amount FROM order_payments WHERE order_id = ? ORDER BY id').all(orderId);
 
   // Group lines by (HSN code, GST rate) — CGST/SGST assume a single, intra-state
   // business (no inter-state IGST handling).
@@ -118,7 +158,7 @@ function assembleReceiptData(orderId) {
 
   const business = getBusinessSettings();
 
-  return { order, items, gstBreakdown, business };
+  return { order, items: attachModifiers(items), gstBreakdown, business, payments };
 }
 
 // Server-side equivalent of the escapeHtml() in src/renderer.js — that one
@@ -151,7 +191,14 @@ function getPrinterSettings(settings = getSettingsMap()) {
 // breakdown, payment mode, footer note); the UPI QR code is intentionally
 // left out here too, to keep this generated page's content identical to
 // what printer/escpos.js's ESC/POS builder produces for the network path.
-function buildReceiptHtml({ business = {}, order = {}, items = [], gstBreakdown = [], paperWidthMm } = {}) {
+function paymentBreakdownText(order, payments) {
+  if (payments && payments.length > 1) {
+    return 'Paid via: ' + payments.map((p) => `${escpos.capitalize(p.mode)} ₹${Number(p.amount).toFixed(2)}`).join(', ');
+  }
+  return order.payment_mode ? 'Paid via ' + order.payment_mode : '';
+}
+
+function buildReceiptHtml({ business = {}, order = {}, items = [], gstBreakdown = [], payments = [], paperWidthMm } = {}) {
   const widthMm = paperWidthMm === '58' ? 58 : 80;
   const money = (n) => Number(n || 0).toFixed(2);
   const rawDate = order.paid_at || order.created_at;
@@ -177,13 +224,16 @@ function buildReceiptHtml({ business = {}, order = {}, items = [], gstBreakdown 
       : '',
   ].join('');
 
-  const itemsRows = items.map((i) => `
+  const itemsRows = items.map((i) => {
+    const modNames = (i.modifiers || []).map((m) => m.name).join(', ');
+    return `
     <tr>
-      <td>${escapeHtml(i.item_name)}</td>
+      <td>${escapeHtml(i.item_name)}${modNames ? `<div class="item-mods">${escapeHtml(modNames)}</div>` : ''}</td>
       <td class="num">${Number(i.quantity) || 0}</td>
       <td class="num">${money(i.unit_price)}</td>
       <td class="num">${money(Number(i.unit_price) * Number(i.quantity))}</td>
-    </tr>`).join('');
+    </tr>`;
+  }).join('');
 
   const gstRows = (gstBreakdown || []).filter((g) => Number(g.gstRate) > 0);
   const gstHtml = gstRows.length ? `
@@ -199,7 +249,8 @@ function buildReceiptHtml({ business = {}, order = {}, items = [], gstBreakdown 
         </tr>`).join('')}</tbody>
     </table>` : '';
 
-  const paymentHtml = order.payment_mode ? `<div class="center">Paid via ${escapeHtml(order.payment_mode)}</div>` : '';
+  const paymentText = paymentBreakdownText(order, payments);
+  const paymentHtml = paymentText ? `<div class="center">${escapeHtml(paymentText)}</div>` : '';
   const footerHtml = business.footerNote ? `<div class="center footer">${escapeHtml(business.footerNote)}</div>` : '';
 
   return `<!doctype html>
@@ -228,6 +279,7 @@ function buildReceiptHtml({ business = {}, order = {}, items = [], gstBreakdown 
   table.tbl { width: 100%; border-collapse: collapse; margin-top: 2px; }
   table.tbl th, table.tbl td { text-align: left; padding: 1px 2px; font-size: 10px; }
   table.tbl th.num, table.tbl td.num { text-align: right; }
+  .item-mods { font-size: 9px; font-style: italic; }
   .footer { margin-top: 6px; }
 </style>
 </head>
@@ -249,6 +301,57 @@ function buildReceiptHtml({ business = {}, order = {}, items = [], gstBreakdown 
   ${gstHtml}
   ${paymentHtml}
   ${footerHtml}
+</body>
+</html>`;
+}
+
+// Minimal, kitchen-only HTML document for the 'system' print path — no
+// prices or GST (see buildKotBuffer() in printer/escpos.js for why). Mirrors
+// that function content-for-content.
+function buildKotHtml({ order = {}, items = [], paperWidthMm } = {}) {
+  const widthMm = paperWidthMm === '58' ? 58 : 80;
+  const typeValue = (order.order_type || '') + (order.table_label ? ' - ' + order.table_label : '');
+
+  const itemsHtml = items.map((i) => {
+    const modNames = (i.modifiers || []).map((m) => m.name).join(', ');
+    return `
+    <div class="kot-item">
+      <div class="kot-item-row"><span>${escapeHtml(i.item_name)}</span><span>x${Number(i.quantity) || 0}</span></div>
+      ${modNames ? `<div class="kot-item-notes">${escapeHtml(modNames)}</div>` : ''}
+      ${i.notes ? `<div class="kot-item-notes">${escapeHtml(i.notes)}</div>` : ''}
+    </div>`;
+  }).join('');
+
+  return `<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  @page { size: ${widthMm}mm auto; margin: 0; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    width: ${widthMm}mm;
+    padding: 2mm;
+    font-family: 'Courier New', Courier, monospace;
+    color: #000;
+    background: #fff;
+  }
+  .center { text-align: center; }
+  .kot-title { font-weight: bold; font-size: 16px; }
+  .kot-meta { font-size: 11px; margin: 2px 0; }
+  hr { border: none; border-top: 1px dashed #000; margin: 3px 0; }
+  .kot-item { margin: 6px 0; }
+  .kot-item-row { display: flex; justify-content: space-between; font-weight: bold; font-size: 15px; }
+  .kot-item-notes { font-size: 12px; font-style: italic; padding-left: 4px; }
+</style>
+</head>
+<body>
+  <div class="center kot-title">KITCHEN ORDER TICKET</div>
+  <div class="center kot-meta">${escapeHtml(typeValue)}${order.id != null ? ' &middot; Order #' + escapeHtml(String(order.id)) : ''}</div>
+  <div class="center kot-meta">${escapeHtml(new Date().toLocaleString())}</div>
+  <hr>
+  ${itemsHtml}
 </body>
 </html>`;
 }
@@ -348,24 +451,47 @@ function printBufferToNetworkPrinter(buffer, { host, port }) {
 // (dialog). Always resolves to { mode } so the renderer knows which of the
 // three paths ran — for 'dialog' it must then call window.print() itself,
 // exactly as it did before this feature existed.
-async function printReceipt({ order, items, gstBreakdown, business }) {
+async function printReceipt({ order, items, gstBreakdown, business, payments = [] }) {
   const { mode, systemName, networkHost, networkPort, paperWidthMm } = getPrinterSettings();
 
   if (mode === 'system') {
     if (!systemName) throw new Error('No system printer selected — choose one in Settings first');
-    const html = buildReceiptHtml({ business, order, items, gstBreakdown, paperWidthMm });
+    const html = buildReceiptHtml({ business, order, items, gstBreakdown, payments, paperWidthMm });
     await printHtmlToSystemPrinter(html, { deviceName: systemName, paperWidthMm });
     return { mode: 'system' };
   }
 
   if (mode === 'network') {
     if (!networkHost) throw new Error('No network printer host configured — set one in Settings first');
-    const buffer = escpos.buildReceiptBuffer({ business, order, items, gstBreakdown, paperWidthMm });
+    const buffer = escpos.buildReceiptBuffer({ business, order, items, gstBreakdown, payments, paperWidthMm });
     await printBufferToNetworkPrinter(buffer, { host: networkHost, port: networkPort });
     return { mode: 'network' };
   }
 
   // mode === 'dialog' (or unset/unrecognized) — behavior-preserving default.
+  return { mode: 'dialog' };
+}
+
+// Same three-way mode contract as printReceipt (see its comment) — resolves
+// to { mode }. 'dialog' means the renderer must build and print its own
+// on-screen KOT content via window.print(), same fallback as receipts.
+async function printKot({ order, items }) {
+  const { mode, systemName, networkHost, networkPort, paperWidthMm } = getPrinterSettings();
+
+  if (mode === 'system') {
+    if (!systemName) throw new Error('No system printer selected — choose one in Settings first');
+    const html = buildKotHtml({ order, items, paperWidthMm });
+    await printHtmlToSystemPrinter(html, { deviceName: systemName, paperWidthMm });
+    return { mode: 'system' };
+  }
+
+  if (mode === 'network') {
+    if (!networkHost) throw new Error('No network printer host configured — set one in Settings first');
+    const buffer = escpos.buildKotBuffer({ order, items, paperWidthMm });
+    await printBufferToNetworkPrinter(buffer, { host: networkHost, port: networkPort });
+    return { mode: 'network' };
+  }
+
   return { mode: 'dialog' };
 }
 
@@ -390,16 +516,243 @@ function getNextInvoiceNumber() {
   return `${prefix}/${fy}/${String(next).padStart(5, '0')}`;
 }
 
+// ---------- Staff ----------
+// No auth required: this is the bootstrap check the renderer makes before
+// it knows whether to show "create the first owner account" or "log in".
+ipcMain.handle('staff:needsSetup', () => {
+  const { count } = db.prepare('SELECT COUNT(*) AS count FROM staff').get();
+  return count === 0;
+});
+
+// No auth required, but only does anything while the staff table is truly
+// empty — guards against this being called later (e.g. from DevTools) to
+// mint a rogue extra owner account once the restaurant is already set up.
+ipcMain.handle('staff:createFirstOwner', (_e, { name, pin }) => {
+  const { count } = db.prepare('SELECT COUNT(*) AS count FROM staff').get();
+  if (count > 0) throw new Error('Setup has already been completed');
+
+  const cleanName = String(name || '').trim();
+  if (!cleanName) throw new Error('Name is required');
+  if (!/^\d{4,6}$/.test(String(pin || ''))) throw new Error('PIN must be 4-6 digits');
+
+  const salt = crypto.randomBytes(16).toString('hex');
+  const row = db.prepare(
+    'INSERT INTO staff (name, pin_hash, pin_salt, role) VALUES (?, ?, ?, ?) RETURNING *'
+  ).get(cleanName, hashPin(pin, salt), salt, 'owner');
+
+  currentStaff = { id: row.id, name: row.name, role: row.role };
+  return currentStaff;
+});
+
+// No auth required (this IS the login) — matches any active staff member's
+// PIN, not scoped to a particular name, since a shared PIN pad doesn't know
+// who's about to type until the PIN identifies them.
+ipcMain.handle('staff:login', (_e, { pin }) => {
+  const candidates = db.prepare('SELECT * FROM staff WHERE is_active = 1').all();
+  const match = candidates.find((s) => verifyPin(pin, s.pin_salt, s.pin_hash));
+  if (!match) throw new Error('Incorrect PIN');
+  currentStaff = { id: match.id, name: match.name, role: match.role };
+  return currentStaff;
+});
+
+ipcMain.handle('staff:logout', () => {
+  currentStaff = null;
+  return { success: true };
+});
+
+// No auth required — this is what the renderer checks on every load so a
+// window reload (Ctrl+R/F5, which restarts the renderer but not this main
+// process) doesn't force a re-login: the session actually lives here, in
+// main.js, not in the renderer's own currentStaff variable. A real app
+// restart still clears this (it's in-memory only, never persisted to disk),
+// which is intentional — that should still require a PIN.
+ipcMain.handle('staff:whoAmI', () => {
+  return currentStaff;
+});
+
+ipcMain.handle('staff:list', () => {
+  requireRole('owner');
+  return db.prepare('SELECT * FROM staff ORDER BY is_active DESC, name').all().map(toStaffView);
+});
+
+ipcMain.handle('staff:add', (_e, { name, pin, role }) => {
+  requireRole('owner');
+  const cleanName = String(name || '').trim();
+  if (!cleanName) throw new Error('Name is required');
+  if (!/^\d{4,6}$/.test(String(pin || ''))) throw new Error('PIN must be 4-6 digits');
+  if (!['owner', 'manager', 'staff'].includes(role)) throw new Error('Invalid role');
+
+  const salt = crypto.randomBytes(16).toString('hex');
+  const row = db.prepare(
+    'INSERT INTO staff (name, pin_hash, pin_salt, role) VALUES (?, ?, ?, ?) RETURNING *'
+  ).get(cleanName, hashPin(pin, salt), salt, role);
+  return toStaffView(row);
+});
+
+// Renaming/re-roling/reactivating and changing a PIN are both "update" —
+// pin is optional so an owner can fix a name or role without also having
+// to know/reset the PIN.
+ipcMain.handle('staff:update', (_e, { id, name, pin, role, isActive }) => {
+  requireRole('owner');
+  const existing = db.prepare('SELECT * FROM staff WHERE id = ?').get(id);
+  if (!existing) throw new Error('Staff member not found');
+
+  const cleanName = name != null ? String(name).trim() : existing.name;
+  if (!cleanName) throw new Error('Name is required');
+  const nextRole = role != null ? role : existing.role;
+  if (!['owner', 'manager', 'staff'].includes(nextRole)) throw new Error('Invalid role');
+  const nextActive = isActive != null ? (isActive ? 1 : 0) : existing.is_active;
+
+  // Demoting/deactivating the last owner would lock everyone out of
+  // Settings/Staff management permanently — same reasoning as the
+  // tables:delete guard against deleting a table with an open order.
+  if (existing.role === 'owner' && (nextRole !== 'owner' || !nextActive)) {
+    const { count } = db.prepare(`SELECT COUNT(*) AS count FROM staff WHERE role = 'owner' AND is_active = 1 AND id != ?`).get(id);
+    if (count === 0) throw new Error('Cannot remove the last active owner account');
+  }
+
+  let salt = existing.pin_salt;
+  let pinHash = existing.pin_hash;
+  if (pin != null && pin !== '') {
+    if (!/^\d{4,6}$/.test(String(pin))) throw new Error('PIN must be 4-6 digits');
+    salt = crypto.randomBytes(16).toString('hex');
+    pinHash = hashPin(pin, salt);
+  }
+
+  const row = db.prepare(
+    'UPDATE staff SET name = ?, pin_hash = ?, pin_salt = ?, role = ?, is_active = ? WHERE id = ? RETURNING *'
+  ).get(cleanName, pinHash, salt, nextRole, nextActive, id);
+
+  // currentStaff is a separate in-memory copy (see the note at its
+  // declaration) — editing your OWN row here doesn't otherwise touch it, so
+  // without this an owner who demotes/deactivates themselves keeps every
+  // owner-only requireRole('owner') check passing for the rest of their
+  // session. Deactivating self ends the session outright, matching what
+  // staff:login would refuse to grant it fresh; otherwise it's kept in
+  // sync so a self-demotion (with another owner still present) takes effect
+  // immediately rather than after the next login.
+  if (currentStaff && currentStaff.id === id) {
+    currentStaff = nextActive ? { id: row.id, name: row.name, role: row.role } : null;
+  }
+
+  return toStaffView(row);
+});
+
+ipcMain.handle('staff:delete', (_e, id) => {
+  requireRole('owner');
+  const existing = db.prepare('SELECT * FROM staff WHERE id = ?').get(id);
+  if (!existing) return { success: true };
+  if (existing.role === 'owner') {
+    // is_active = 1 here, matching staff:update's guard — an inactive
+    // owner row doesn't count as "another owner", or deleting the last
+    // *active* owner while a deactivated one still exists would pass this
+    // check and lock everyone out of Settings/Staff management.
+    const { count } = db.prepare(`SELECT COUNT(*) AS count FROM staff WHERE role = 'owner' AND is_active = 1 AND id != ?`).get(id);
+    if (count === 0) throw new Error('Cannot delete the last active owner account');
+  }
+  db.prepare('DELETE FROM staff WHERE id = ?').run(id);
+  // Deleting your OWN account must end the session — otherwise currentStaff
+  // keeps pointing at a row that no longer exists, and the next action that
+  // references it (e.g. orders:create writing created_by_staff_id) throws a
+  // raw FOREIGN KEY constraint error instead of a clean "please log in".
+  if (currentStaff && currentStaff.id === id) currentStaff = null;
+  return { success: true };
+});
+
+// ---------- Shifts ----------
+// Sums order_payments by tender for a shift, identified by id boundary —
+// shared by shifts:preview (the still-open shift) and shifts:close (the
+// same computation, snapshotted permanently onto the row). id rather than a
+// timestamp range: see the comment on shifts.opening_payment_id in
+// schema.sql for why. Split payments are handled correctly since each
+// tender is its own order_payments row; order_count is DISTINCT so a split
+// payment's two rows don't double-count its one order.
+function computeShiftSales(sincePaymentId) {
+  const row = db.prepare(`
+    SELECT
+      COALESCE(SUM(CASE WHEN op.mode = 'cash' THEN op.amount ELSE 0 END), 0) AS cash_sales,
+      COALESCE(SUM(CASE WHEN op.mode = 'card' THEN op.amount ELSE 0 END), 0) AS card_sales,
+      COALESCE(SUM(CASE WHEN op.mode = 'upi'  THEN op.amount ELSE 0 END), 0) AS upi_sales,
+      COUNT(DISTINCT op.order_id) AS order_count
+    FROM order_payments op
+    WHERE op.id > ?
+  `).get(sincePaymentId);
+  return {
+    cashSales: +Number(row.cash_sales).toFixed(2),
+    cardSales: +Number(row.card_sales).toFixed(2),
+    upiSales: +Number(row.upi_sales).toFixed(2),
+    orderCount: row.order_count,
+  };
+}
+
+ipcMain.handle('shifts:current', () => {
+  return db.prepare('SELECT * FROM shifts WHERE closed_at IS NULL').get() || null;
+});
+
+ipcMain.handle('shifts:open', (_e, { openingFloat }) => {
+  requireLogin();
+  const existing = db.prepare('SELECT id FROM shifts WHERE closed_at IS NULL').get();
+  if (existing) throw new Error('A shift is already open');
+  const float = Number(openingFloat);
+  if (!Number.isFinite(float) || float < 0) throw new Error('Opening float must be a non-negative number');
+  const { maxId } = db.prepare('SELECT COALESCE(MAX(id), 0) AS maxId FROM order_payments').get();
+  return db.prepare(
+    'INSERT INTO shifts (opened_by_staff_id, opened_by_name, opening_float, opening_payment_id) VALUES (?, ?, ?, ?) RETURNING *'
+  ).get(currentStaff.id, currentStaff.name, float, maxId);
+});
+
+// Read-only preview of what closing right now would look like — lets the
+// Close Shift screen show the expected-cash figure before anyone commits to
+// closing. Same computation as shifts:close, just not written anywhere.
+ipcMain.handle('shifts:preview', () => {
+  const shift = db.prepare('SELECT * FROM shifts WHERE closed_at IS NULL').get();
+  if (!shift) throw new Error('No shift is currently open');
+  const sales = computeShiftSales(shift.opening_payment_id);
+  const expectedCash = +(Number(shift.opening_float) + sales.cashSales).toFixed(2);
+  return { shift, ...sales, expectedCash };
+});
+
+ipcMain.handle('shifts:close', (_e, { countedCash, notes }) => {
+  requireLogin();
+  const shift = db.prepare('SELECT * FROM shifts WHERE closed_at IS NULL').get();
+  if (!shift) throw new Error('No shift is currently open');
+  const counted = Number(countedCash);
+  if (!Number.isFinite(counted) || counted < 0) throw new Error('Counted cash must be a non-negative number');
+
+  const sales = computeShiftSales(shift.opening_payment_id);
+  const expectedCash = +(Number(shift.opening_float) + sales.cashSales).toFixed(2);
+
+  return db.prepare(`
+    UPDATE shifts SET
+      closed_at = CURRENT_TIMESTAMP, closed_by_staff_id = ?, closed_by_name = ?,
+      cash_sales = ?, card_sales = ?, upi_sales = ?, order_count = ?,
+      expected_cash = ?, counted_cash = ?, notes = ?
+    WHERE id = ? RETURNING *
+  `).get(
+    currentStaff.id, currentStaff.name,
+    sales.cashSales, sales.cardSales, sales.upiSales, sales.orderCount,
+    expectedCash, counted, String(notes || '').trim() || null,
+    shift.id
+  );
+});
+
+ipcMain.handle('shifts:history', () => {
+  requireRole('owner', 'manager');
+  return db.prepare('SELECT * FROM shifts WHERE closed_at IS NOT NULL ORDER BY closed_at DESC LIMIT 100').all();
+});
+
 // ---------- Menu: Categories ----------
 ipcMain.handle('categories:list', () => {
   return db.prepare('SELECT * FROM categories ORDER BY sort_order, name').all();
 });
 
 ipcMain.handle('categories:add', (_e, name) => {
+  requireRole('owner', 'manager');
   return db.prepare('INSERT INTO categories (name) VALUES (?) RETURNING *').get(name);
 });
 
 ipcMain.handle('categories:delete', (_e, id) => {
+  requireRole('owner', 'manager');
   db.prepare('DELETE FROM categories WHERE id = ?').run(id);
   return { success: true };
 });
@@ -410,11 +763,13 @@ ipcMain.handle('subcategories:list', () => {
 });
 
 ipcMain.handle('subcategories:add', (_e, { name, categoryId }) => {
+  requireRole('owner', 'manager');
   return db.prepare('INSERT INTO subcategories (name, category_id) VALUES (?, ?) RETURNING *')
     .get(name, categoryId);
 });
 
 ipcMain.handle('subcategories:delete', (_e, id) => {
+  requireRole('owner', 'manager');
   db.prepare('DELETE FROM subcategories WHERE id = ?').run(id);
   return { success: true };
 });
@@ -422,7 +777,8 @@ ipcMain.handle('subcategories:delete', (_e, id) => {
 // ---------- Menu: Items ----------
 ipcMain.handle('menu:list', () => {
   return db.prepare(`
-    SELECT m.*, c.name AS category_name, sc.name AS subcategory_name
+    SELECT m.*, c.name AS category_name, sc.name AS subcategory_name,
+           (SELECT COUNT(*) FROM modifier_groups mg WHERE mg.menu_item_id = m.id) AS modifier_group_count
     FROM menu_items m
     LEFT JOIN categories c ON c.id = m.category_id
     LEFT JOIN subcategories sc ON sc.id = m.subcategory_id
@@ -431,6 +787,7 @@ ipcMain.handle('menu:list', () => {
 });
 
 ipcMain.handle('menu:add', (_e, item) => {
+  requireRole('owner', 'manager');
   return db.prepare(
     `INSERT INTO menu_items (name, price, category_id, subcategory_id, is_available, hsn_code, gst_rate)
      VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING *`
@@ -446,6 +803,7 @@ ipcMain.handle('menu:add', (_e, item) => {
 });
 
 ipcMain.handle('menu:update', (_e, item) => {
+  requireRole('owner', 'manager');
   return db.prepare(
     `UPDATE menu_items SET name = ?, price = ?, category_id = ?, subcategory_id = ?, is_available = ?, hsn_code = ?, gst_rate = ?
      WHERE id = ? RETURNING *`
@@ -462,20 +820,75 @@ ipcMain.handle('menu:update', (_e, item) => {
 });
 
 ipcMain.handle('menu:delete', (_e, id) => {
+  requireRole('owner', 'manager');
   db.prepare('DELETE FROM menu_items WHERE id = ?').run(id);
   return { success: true };
 });
 
 ipcMain.handle('menu:toggleAvailability', (_e, id) => {
+  requireRole('owner', 'manager');
   return db.prepare('UPDATE menu_items SET is_available = NOT is_available WHERE id = ? RETURNING *').get(id);
 });
 
 ipcMain.handle('menu:bulkSetGstRate', (_e, { gstRate, categoryId }) => {
+  requireRole('owner', 'manager');
   const rate = assertValidGstRate(gstRate);
   const info = categoryId
     ? db.prepare('UPDATE menu_items SET gst_rate = ? WHERE category_id = ?').run(rate, categoryId)
     : db.prepare('UPDATE menu_items SET gst_rate = ?').run(rate);
   return { success: true, updated: info.changes };
+});
+
+// ---------- Menu: Item modifiers ----------
+ipcMain.handle('modifiers:listGroups', (_e, menuItemId) => {
+  const groups = db.prepare('SELECT * FROM modifier_groups WHERE menu_item_id = ? ORDER BY sort_order, id').all(menuItemId);
+  // Called on every tap of a modifier-bearing item in Take Order plus every
+  // render of the Menu's modifier-management modal — most items have no
+  // modifier groups at all, so skip the options query (and the redundant
+  // menu_item_id subquery scan it used to run) in that common case, and use
+  // the group ids already fetched above instead of re-deriving them.
+  if (!groups.length) return [];
+  const groupIds = groups.map((g) => g.id);
+  const options = db.prepare(
+    `SELECT * FROM modifier_options WHERE group_id IN (${groupIds.map(() => '?').join(',')}) ORDER BY sort_order, id`
+  ).all(...groupIds);
+  return groups.map((g) => ({ ...g, options: options.filter((o) => o.group_id === g.id) }));
+});
+
+ipcMain.handle('modifiers:addGroup', (_e, { menuItemId, name, minSelect, maxSelect }) => {
+  requireRole('owner', 'manager');
+  const trimmedName = String(name || '').trim();
+  if (!trimmedName) throw new Error('Group name is required');
+  const max = Number(maxSelect);
+  if (!Number.isInteger(max) || max < 1) throw new Error('Max selections must be a whole number of at least 1');
+  const min = minSelect == null ? 0 : Number(minSelect);
+  if (!Number.isInteger(min) || min < 0 || min > max) throw new Error('Min selections must be a whole number between 0 and max selections');
+  return db.prepare(
+    'INSERT INTO modifier_groups (menu_item_id, name, min_select, max_select) VALUES (?, ?, ?, ?) RETURNING *'
+  ).get(menuItemId, trimmedName, min, max);
+});
+
+ipcMain.handle('modifiers:deleteGroup', (_e, groupId) => {
+  requireRole('owner', 'manager');
+  db.prepare('DELETE FROM modifier_groups WHERE id = ?').run(groupId); // cascades to modifier_options
+  return { success: true };
+});
+
+ipcMain.handle('modifiers:addOption', (_e, { groupId, name, priceDelta }) => {
+  requireRole('owner', 'manager');
+  const trimmedName = String(name || '').trim();
+  if (!trimmedName) throw new Error('Option name is required');
+  const delta = priceDelta == null || priceDelta === '' ? 0 : Number(priceDelta);
+  if (!Number.isFinite(delta)) throw new Error('Price adjustment must be a number');
+  return db.prepare(
+    'INSERT INTO modifier_options (group_id, name, price_delta) VALUES (?, ?, ?) RETURNING *'
+  ).get(groupId, trimmedName, delta);
+});
+
+ipcMain.handle('modifiers:deleteOption', (_e, optionId) => {
+  requireRole('owner', 'manager');
+  db.prepare('DELETE FROM modifier_options WHERE id = ?').run(optionId);
+  return { success: true };
 });
 
 // ---------- Tables ----------
@@ -489,6 +902,7 @@ ipcMain.handle('tables:list', () => {
 });
 
 ipcMain.handle('tables:add', (_e, { name, seats }) => {
+  requireLogin();
   const cleanName = String(name || '').trim();
   if (!cleanName) throw new Error('Table name is required');
   const seatCount = seats != null && seats !== '' ? Number(seats) : null;
@@ -499,6 +913,7 @@ ipcMain.handle('tables:add', (_e, { name, seats }) => {
 });
 
 ipcMain.handle('tables:delete', (_e, id) => {
+  requireLogin();
   const openOrder = db.prepare(`SELECT id FROM orders WHERE table_id = ? AND status = 'open'`).get(id);
   if (openOrder) throw new Error('This table has an open order — close or cancel it first');
   db.prepare('DELETE FROM restaurant_tables WHERE id = ?').run(id);
@@ -515,6 +930,7 @@ ipcMain.handle('orders:listAll', () => {
 });
 
 ipcMain.handle('orders:create', (_e, { orderType, tableLabel, source, tableId }) => {
+  requireLogin();
   let label = tableLabel || null;
   let linkedTableId = tableId || null;
   if (linkedTableId) {
@@ -524,18 +940,33 @@ ipcMain.handle('orders:create', (_e, { orderType, tableLabel, source, tableId })
     if (existing) throw new Error(`Table "${table.name}" already has an open order`);
     label = table.name;
   }
-  return db.prepare('INSERT INTO orders (order_type, table_label, table_id, source) VALUES (?, ?, ?, ?) RETURNING *')
-    .get(orderType || 'dine-in', label, linkedTableId, source || 'in-house');
+  return db.prepare(
+    `INSERT INTO orders (order_type, table_label, table_id, source, created_by_staff_id, created_by_name)
+     VALUES (?, ?, ?, ?, ?, ?) RETURNING *`
+  ).get(orderType || 'dine-in', label, linkedTableId, source || 'in-house', currentStaff.id, currentStaff.name);
 });
+
+// Attaches each order_item's chosen modifiers (order_item_modifiers) as a
+// nested `.modifiers` array — shared by orders:get and anywhere else that
+// needs a full order-with-items-with-modifiers shape.
+function attachModifiers(items) {
+  if (!items.length) return items;
+  const ids = items.map((i) => i.id);
+  const modifiers = db.prepare(
+    `SELECT * FROM order_item_modifiers WHERE order_item_id IN (${ids.map(() => '?').join(',')})`
+  ).all(...ids);
+  return items.map((i) => ({ ...i, modifiers: modifiers.filter((m) => m.order_item_id === i.id) }));
+}
 
 ipcMain.handle('orders:get', (_e, orderId) => {
   const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(orderId);
   if (!order) return null;
   const items = db.prepare('SELECT * FROM order_items WHERE order_id = ? ORDER BY id').all(orderId);
-  return { ...order, items };
+  return { ...order, items: attachModifiers(items) };
 });
 
-ipcMain.handle('orders:addItem', (_e, { orderId, menuItemId, name, price, quantity, notes }) => {
+ipcMain.handle('orders:addItem', (_e, { orderId, menuItemId, name, price, quantity, notes, modifierOptionIds }) => {
+  requireLogin();
   // Price/name/HSN/GST always come from the menu server-side when a real
   // menuItemId is given — the caller's own price/name are only trusted for a
   // one-off custom line (no menuItemId), and even then must be a sane number.
@@ -547,7 +978,41 @@ ipcMain.handle('orders:addItem', (_e, { orderId, menuItemId, name, price, quanti
   const itemName = menuItem ? menuItem.name : String(name || '').trim();
   if (!itemName) throw new Error('Item name is required');
 
-  const unitPrice = menuItem ? Number(menuItem.price) : Number(price);
+  // Selected modifiers are re-fetched by id server-side (never trust a
+  // client-supplied name/price for them, same reasoning as menuItemId's
+  // price above) and cross-checked against menuItemId so an id belonging to
+  // a different item's modifier group can't be smuggled in. A one-off
+  // custom line (no menuItemId) has no modifier groups to apply.
+  let selectedOptions = [];
+  if (menuItemId && modifierOptionIds && modifierOptionIds.length) {
+    const placeholders = modifierOptionIds.map(() => '?').join(',');
+    selectedOptions = db.prepare(`
+      SELECT mo.id, mo.group_id, mo.name, mo.price_delta
+      FROM modifier_options mo
+      JOIN modifier_groups mg ON mg.id = mo.group_id
+      WHERE mo.id IN (${placeholders}) AND mg.menu_item_id = ?
+    `).all(...modifierOptionIds, menuItemId);
+    if (selectedOptions.length !== modifierOptionIds.length) {
+      throw new Error('One or more selected options are invalid for this item');
+    }
+  }
+  if (menuItemId) {
+    const groups = db.prepare('SELECT id, name, min_select, max_select FROM modifier_groups WHERE menu_item_id = ?').all(menuItemId);
+    groups.forEach((g) => {
+      const count = selectedOptions.filter((o) => o.group_id === g.id).length;
+      if (count < g.min_select || count > g.max_select) {
+        throw new Error(`"${g.name}" requires between ${g.min_select} and ${g.max_select} selection(s)`);
+      }
+    });
+  }
+
+  // Modifier price deltas are folded straight into unit_price here rather
+  // than kept as a separate charge — see the comment on order_item_modifiers
+  // in schema.sql for why: every downstream total/tax/report calculation
+  // then needs zero changes, since they already operate on unit_price.
+  const modifierTotal = selectedOptions.reduce((sum, o) => sum + Number(o.price_delta), 0);
+  const baseUnitPrice = menuItem ? Number(menuItem.price) : Number(price);
+  const unitPrice = +(baseUnitPrice + modifierTotal).toFixed(2);
   if (!Number.isFinite(unitPrice) || unitPrice < 0) throw new Error('Invalid price');
 
   const hsnCode = menuItem ? menuItem.hsn_code : null;
@@ -556,15 +1021,32 @@ ipcMain.handle('orders:addItem', (_e, { orderId, menuItemId, name, price, quanti
   const qty = quantity == null ? 1 : Number(quantity);
   if (!Number.isInteger(qty) || qty <= 0) throw new Error('Quantity must be a positive whole number');
 
-  db.prepare(
-    `INSERT INTO order_items (order_id, menu_item_id, item_name, unit_price, quantity, notes, hsn_code, gst_rate, tax_amount)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
-  ).run(orderId, menuItemId, itemName, unitPrice, qty, notes || null, hsnCode, gstRate, lineTax(unitPrice, qty, gstRate));
-  recalcOrder(orderId);
-  return db.prepare('SELECT * FROM orders WHERE id = ?').get(orderId);
+  // One transaction, not three independent statements — without this, a
+  // failure between the order_items insert and the order_item_modifiers
+  // inserts (e.g. a disk/lock error on the 2nd of 2 selected options) would
+  // leave a line item priced with both modifiers folded into unit_price but
+  // only one of them recorded, so the kitchen ticket and receipt silently
+  // drop a modifier the customer was actually charged for.
+  const addItem = db.transaction(() => {
+    const orderItem = db.prepare(
+      `INSERT INTO order_items (order_id, menu_item_id, item_name, unit_price, quantity, notes, hsn_code, gst_rate, tax_amount)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`
+    ).get(orderId, menuItemId, itemName, unitPrice, qty, notes || null, hsnCode, gstRate, lineTax(unitPrice, qty, gstRate));
+
+    if (selectedOptions.length) {
+      const insertMod = db.prepare('INSERT INTO order_item_modifiers (order_item_id, name, price_delta) VALUES (?, ?, ?)');
+      selectedOptions.forEach((o) => insertMod.run(orderItem.id, o.name, o.price_delta));
+    }
+
+    recalcOrder(orderId);
+    return db.prepare('SELECT * FROM orders WHERE id = ?').get(orderId);
+  });
+
+  return addItem();
 });
 
 ipcMain.handle('orders:updateItemQty', (_e, { orderItemId, quantity, orderId }) => {
+  requireLogin();
   const qty = Number(quantity);
   if (qty <= 0) {
     db.prepare('DELETE FROM order_items WHERE id = ?').run(orderItemId);
@@ -579,12 +1061,14 @@ ipcMain.handle('orders:updateItemQty', (_e, { orderItemId, quantity, orderId }) 
 });
 
 ipcMain.handle('orders:removeItem', (_e, { orderItemId, orderId }) => {
+  requireLogin();
   db.prepare('DELETE FROM order_items WHERE id = ?').run(orderItemId);
   recalcOrder(orderId);
   return db.prepare('SELECT * FROM orders WHERE id = ?').get(orderId);
 });
 
 ipcMain.handle('orders:setDiscount', (_e, { orderId, discount }) => {
+  requireLogin();
   const value = Number(discount);
   const safeDiscount = Number.isFinite(value) && value > 0 ? value : 0;
   // recalcOrder clamps this down further to at most subtotal + tax, so the
@@ -595,27 +1079,92 @@ ipcMain.handle('orders:setDiscount', (_e, { orderId, discount }) => {
 });
 
 ipcMain.handle('orders:cancel', (_e, orderId) => {
-  const order = db.prepare(`UPDATE orders SET status = 'cancelled' WHERE id = ? AND status = 'open' RETURNING *`).get(orderId);
+  requireLogin();
+  const order = db.prepare(
+    `UPDATE orders SET status = 'cancelled', closed_by_staff_id = ?, closed_by_name = ?
+     WHERE id = ? AND status = 'open' RETURNING *`
+  ).get(currentStaff.id, currentStaff.name, orderId);
   if (!order) throw new Error('Only open orders can be cancelled');
   return order;
 });
 
 // ---------- Billing ----------
-ipcMain.handle('billing:finalize', (_e, { orderId, paymentMode }) => {
-  const order = db.prepare('SELECT status FROM orders WHERE id = ?').get(orderId);
+// Two ways to pay: a single `paymentMode` covering the full total (unchanged
+// since v1), or a `payments` array of { mode, amount } tenders for a split
+// payment (e.g. part cash + part card) — exactly one of the two is given.
+ipcMain.handle('billing:finalize', (_e, { orderId, paymentMode, payments, customerPhone, customerName }) => {
+  requireLogin();
+  const order = db.prepare('SELECT status, total FROM orders WHERE id = ?').get(orderId);
   if (!order) throw new Error('Order not found');
   if (order.status !== 'open') throw new Error('Only open orders can be charged');
-  // Status is checked before consuming an invoice number, so a rejected
-  // charge (already paid/cancelled) never burns a gap in the sequence.
-  const invoiceNumber = getNextInvoiceNumber();
-  return db.prepare(
-    `UPDATE orders SET status = 'paid', payment_mode = ?, paid_at = CURRENT_TIMESTAMP, invoice_number = ?
-     WHERE id = ? RETURNING *`
-  ).get(paymentMode, invoiceNumber, orderId);
+
+  // Both optional — most walk-in cash customers won't give a phone number,
+  // and that's fine. Validated loosely (digits, 7-15 long) rather than
+  // strictly to a 10-digit Indian mobile format, since this field also has
+  // to accept a landline or a number with a country code.
+  const cleanPhone = customerPhone != null ? String(customerPhone).replace(/\s+/g, '') : '';
+  if (cleanPhone && !/^\d{7,15}$/.test(cleanPhone)) throw new Error('Enter a valid phone number');
+  const cleanCustomerName = customerName != null ? String(customerName).trim() : '';
+
+  let tenders;
+  if (payments && payments.length) {
+    tenders = payments.map((p) => {
+      const amount = Number(p.amount);
+      if (!Number.isFinite(amount) || amount <= 0) throw new Error('Each payment amount must be a positive number');
+      if (!['cash', 'card', 'upi'].includes(p.mode)) throw new Error(`Invalid payment mode "${p.mode}"`);
+      return { mode: p.mode, amount };
+    });
+    const sum = +tenders.reduce((s, p) => s + p.amount, 0).toFixed(2);
+    // 1-paisa tolerance mirrors the rounding recalcOrder already does on
+    // subtotal/tax/total — without it a fully-covered split could be
+    // rejected over a stray fractional-rupee rounding mismatch.
+    if (Math.abs(sum - Number(order.total)) > 0.01) {
+      throw new Error(`Payments total ₹${sum.toFixed(2)} does not match order total ₹${Number(order.total).toFixed(2)}`);
+    }
+  } else if (paymentMode) {
+    // Validated here too, not just left to the orders.payment_mode CHECK
+    // constraint — a constraint failure would surface as a raw SqliteError
+    // instead of a clean message, and (before the transaction wrap below)
+    // would burn an invoice number on the way to that failure.
+    if (!['cash', 'card', 'upi'].includes(paymentMode)) throw new Error(`Invalid payment mode "${paymentMode}"`);
+    tenders = [{ mode: paymentMode, amount: Number(order.total) }];
+  } else {
+    throw new Error('A payment mode or a list of payments is required');
+  }
+
+  // payment_mode stays a single value for display/backward-compat: the
+  // tender's mode when there's exactly one, NULL for a genuine split (NULL
+  // is already a valid value here per the column's CHECK constraint, same
+  // as any unpaid order). order_payments below is the source of truth for
+  // the actual breakdown either way — see billing:getReceipt.
+  const displayMode = tenders.length === 1 ? tenders[0].mode : null;
+
+  // Invoice number + order update + every payment row committed as one
+  // transaction — getNextInvoiceNumber() itself writes to `settings`, so
+  // without this, a failure partway through (e.g. the 2nd of 3 split
+  // tenders) would leave the order permanently 'paid' with an invoice
+  // number already consumed but incomplete/missing payment rows, silently
+  // corrupting shift reconciliation with no way to re-finalize the order.
+  const finalize = db.transaction(() => {
+    const invoiceNumber = getNextInvoiceNumber();
+    const updated = db.prepare(
+      `UPDATE orders SET status = 'paid', payment_mode = ?, paid_at = CURRENT_TIMESTAMP, invoice_number = ?,
+       closed_by_staff_id = ?, closed_by_name = ?,
+       customer_phone = COALESCE(NULLIF(?, ''), customer_phone), customer_name = COALESCE(NULLIF(?, ''), customer_name)
+       WHERE id = ? RETURNING *`
+    ).get(displayMode, invoiceNumber, currentStaff.id, currentStaff.name, cleanPhone, cleanCustomerName, orderId);
+
+    const insertPayment = db.prepare('INSERT INTO order_payments (order_id, mode, amount) VALUES (?, ?, ?)');
+    tenders.forEach((p) => insertPayment.run(orderId, p.mode, p.amount));
+
+    return updated;
+  });
+
+  return finalize();
 });
 
 ipcMain.handle('billing:getReceipt', async (_e, orderId) => {
-  const { order, items, gstBreakdown, business } = assembleReceiptData(orderId);
+  const { order, items, gstBreakdown, business, payments } = assembleReceiptData(orderId);
   const settings = getSettingsMap();
 
   let qrDataUrl = null;
@@ -624,7 +1173,39 @@ ipcMain.handle('billing:getReceipt', async (_e, orderId) => {
     qrDataUrl = await QRCode.toDataURL(upiUrl, { margin: 1, width: 180 });
   }
 
-  return { ...order, items, gstBreakdown, business, qrDataUrl };
+  return { ...order, items, gstBreakdown, business, qrDataUrl, payments };
+});
+
+// ---------- Customers ----------
+// No dedicated customers table — a repeat customer is just "this phone
+// number appears on an earlier order". visitCount excludes cancelled
+// orders (those weren't really a visit); name is whichever name was most
+// recently entered for this phone, so a typo gets self-corrected next time
+// it's entered right, rather than a stale name sticking forever.
+ipcMain.handle('customers:lookup', (_e, phone) => {
+  requireLogin(); // returns a customer's name — PII, same bar as every other order/billing handler
+  // Strip everything but digits, not just whitespace — billing:finalize
+  // validates customer_phone as digits-only before it's ever stored (see
+  // its cleanPhone), so the stored value never has dashes/parens/spaces.
+  // Only stripping whitespace here would fail to match a phone the cashier
+  // types back with different formatting (e.g. "98765-43210" vs "9876543210"
+  // stored), silently missing a real repeat customer.
+  const cleanPhone = String(phone || '').replace(/\D/g, '');
+  if (!cleanPhone) return null;
+
+  // One query, not two: order.customer_phone is indexed (idx_orders_customer_phone),
+  // and this fires on every keystroke once a phone number reaches 10 digits
+  // (see lookupCustomerByPhone in renderer.js), so it's on an interactive
+  // typing path, not a background job. created_at only has second-level
+  // resolution (SQLite's CURRENT_TIMESTAMP), so id is the tiebreaker that
+  // actually reflects creation order for same-second rows.
+  const rows = db.prepare(
+    `SELECT customer_name FROM orders WHERE customer_phone = ? AND status != 'cancelled' ORDER BY created_at DESC, id DESC`
+  ).all(cleanPhone);
+  if (!rows.length) return null;
+
+  const latestNamed = rows.find((r) => r.customer_name);
+  return { name: latestNamed ? latestNamed.customer_name : null, visitCount: rows.length };
 });
 
 // ---------- Printing ----------
@@ -639,8 +1220,8 @@ ipcMain.handle('printers:listSystem', async () => {
 // existing window.print() call itself, exactly as it did before this feature
 // existed. mode: 'system' | 'network' means printing has already happened.
 ipcMain.handle('receipt:print', async (_e, { orderId }) => {
-  const { order, items, gstBreakdown, business } = assembleReceiptData(orderId);
-  return printReceipt({ order, items, gstBreakdown, business });
+  const { order, items, gstBreakdown, business, payments } = assembleReceiptData(orderId);
+  return printReceipt({ order, items, gstBreakdown, business, payments });
 });
 
 // Prints a synthetic, made-up receipt (current business settings + two fake
@@ -648,6 +1229,7 @@ ipcMain.handle('receipt:print', async (_e, { orderId }) => {
 // screen without ringing up and paying a real order. Same three-way
 // mode/{mode} contract as receipt:print.
 ipcMain.handle('receipt:testPrint', async () => {
+  requireRole('owner'); // only reachable from the owner-only Settings screen — settings:update is gated the same way
   const business = getBusinessSettings();
 
   const testItems = [
@@ -684,8 +1266,60 @@ ipcMain.handle('receipt:testPrint', async () => {
   return printReceipt({ order, items: testItems, gstBreakdown, business });
 });
 
+// Prints only the order_items not yet sent to the kitchen (kot_fired_at IS
+// NULL) — repeated taps only fire what's new since the last KOT, so the
+// kitchen never re-cooks an already-fired line. Resolves to { mode, count };
+// mode:'none' (count:0) means there was nothing new to send — the renderer
+// should treat that as a quiet no-op, not an error. The exact set of item
+// ids printed is captured before the print await and reused for the update
+// below, rather than re-querying "still NULL" after — an item added to this
+// order while the print is in flight (e.g. a slow network printer) must not
+// be silently marked fired without ever having been printed.
+//
+// For system/network mode, printKot() has already awaited a real print
+// attempt by the time we get here (and throws on failure, which skips the
+// UPDATE below entirely) — so marking fired now is correct. For 'dialog'
+// mode nothing has actually been printed yet: main.js just hands the item
+// list back and the renderer prints it later via window.print(). Marking
+// fired here too would lose the KOT for good if that print is cancelled or
+// fails, with no unfired items left to retry — so 'dialog' instead returns
+// itemIds and leaves the marking to receipt:confirmKotPrinted, called by the
+// renderer only after window.print() actually returns.
+ipcMain.handle('receipt:printKot', async (_e, { orderId }) => {
+  requireLogin();
+  const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(orderId);
+  if (!order) throw new Error('Order not found');
+  const items = db.prepare('SELECT * FROM order_items WHERE order_id = ? AND kot_fired_at IS NULL ORDER BY id').all(orderId);
+  if (!items.length) return { mode: 'none', count: 0 };
+
+  const result = await printKot({ order, items: attachModifiers(items) });
+  const ids = items.map((i) => i.id);
+
+  if (result.mode === 'dialog') {
+    return { ...result, count: items.length, itemIds: ids };
+  }
+
+  db.prepare(`UPDATE order_items SET kot_fired_at = CURRENT_TIMESTAMP WHERE id IN (${ids.map(() => '?').join(',')})`)
+    .run(...ids);
+
+  return { ...result, count: items.length };
+});
+
+// Companion to receipt:printKot's 'dialog' branch — see the comment there.
+// Called by the renderer once window.print() for the KOT has returned.
+// kot_fired_at IS NULL in the WHERE guards against marking an item that was
+// somehow already fired by another path in the meantime.
+ipcMain.handle('receipt:confirmKotPrinted', (_e, { itemIds }) => {
+  requireLogin();
+  if (!itemIds || !itemIds.length) return { success: true };
+  db.prepare(`UPDATE order_items SET kot_fired_at = CURRENT_TIMESTAMP WHERE kot_fired_at IS NULL AND id IN (${itemIds.map(() => '?').join(',')})`)
+    .run(...itemIds);
+  return { success: true };
+});
+
 // ---------- Reports ----------
 ipcMain.handle('reports:summary', (_e, { startDate, endDate }) => {
+  requireRole('owner', 'manager');
   const dateFilter = startDate && endDate ? "AND date(o.paid_at, 'localtime') BETWEEN date(?) AND date(?)" : '';
   const dateParams = startDate && endDate ? [startDate, endDate] : [];
 
@@ -741,6 +1375,7 @@ ipcMain.handle('reports:summary', (_e, { startDate, endDate }) => {
 });
 
 ipcMain.handle('reports:exportExcel', async (_e, { startDate, endDate }) => {
+  requireRole('owner', 'manager');
   const dateFilter = startDate && endDate ? "AND date(paid_at, 'localtime') BETWEEN date(?) AND date(?)" : '';
   const dateParams = startDate && endDate ? [startDate, endDate] : [];
 
@@ -861,6 +1496,7 @@ ipcMain.handle('settings:get', () => {
 });
 
 ipcMain.handle('settings:update', (_e, payload) => {
+  requireRole('owner');
   const upsert = db.prepare(`
     INSERT INTO settings (key, value) VALUES (?, ?)
     ON CONFLICT (key) DO UPDATE SET value = excluded.value

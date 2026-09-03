@@ -1,6 +1,17 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('pos', {
+  staff: {
+    needsSetup: () => ipcRenderer.invoke('staff:needsSetup'),
+    createFirstOwner: (payload) => ipcRenderer.invoke('staff:createFirstOwner', payload),
+    login: (payload) => ipcRenderer.invoke('staff:login', payload),
+    logout: () => ipcRenderer.invoke('staff:logout'),
+    whoAmI: () => ipcRenderer.invoke('staff:whoAmI'),
+    list: () => ipcRenderer.invoke('staff:list'),
+    add: (payload) => ipcRenderer.invoke('staff:add', payload),
+    update: (payload) => ipcRenderer.invoke('staff:update', payload),
+    delete: (id) => ipcRenderer.invoke('staff:delete', id),
+  },
   categories: {
     list: () => ipcRenderer.invoke('categories:list'),
     add: (name) => ipcRenderer.invoke('categories:add', name),
@@ -24,6 +35,13 @@ contextBridge.exposeInMainWorld('pos', {
     toggleAvailability: (id) => ipcRenderer.invoke('menu:toggleAvailability', id),
     bulkSetGstRate: (payload) => ipcRenderer.invoke('menu:bulkSetGstRate', payload),
   },
+  modifiers: {
+    listGroups: (menuItemId) => ipcRenderer.invoke('modifiers:listGroups', menuItemId),
+    addGroup: (payload) => ipcRenderer.invoke('modifiers:addGroup', payload),
+    deleteGroup: (groupId) => ipcRenderer.invoke('modifiers:deleteGroup', groupId),
+    addOption: (payload) => ipcRenderer.invoke('modifiers:addOption', payload),
+    deleteOption: (optionId) => ipcRenderer.invoke('modifiers:deleteOption', optionId),
+  },
   orders: {
     listOpen: () => ipcRenderer.invoke('orders:listOpen'),
     listAll: () => ipcRenderer.invoke('orders:listAll'),
@@ -39,12 +57,24 @@ contextBridge.exposeInMainWorld('pos', {
     finalize: (payload) => ipcRenderer.invoke('billing:finalize', payload),
     getReceipt: (orderId) => ipcRenderer.invoke('billing:getReceipt', orderId),
   },
+  customers: {
+    lookup: (phone) => ipcRenderer.invoke('customers:lookup', phone),
+  },
+  shifts: {
+    current: () => ipcRenderer.invoke('shifts:current'),
+    open: (payload) => ipcRenderer.invoke('shifts:open', payload),
+    preview: () => ipcRenderer.invoke('shifts:preview'),
+    close: (payload) => ipcRenderer.invoke('shifts:close', payload),
+    history: () => ipcRenderer.invoke('shifts:history'),
+  },
   printers: {
     listSystem: () => ipcRenderer.invoke('printers:listSystem'),
   },
   receipt: {
     print: (payload) => ipcRenderer.invoke('receipt:print', payload),
     testPrint: () => ipcRenderer.invoke('receipt:testPrint'),
+    printKot: (payload) => ipcRenderer.invoke('receipt:printKot', payload),
+    confirmKotPrinted: (payload) => ipcRenderer.invoke('receipt:confirmKotPrinted', payload),
   },
   reports: {
     summary: (payload) => ipcRenderer.invoke('reports:summary', payload),

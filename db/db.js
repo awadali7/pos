@@ -35,5 +35,17 @@ ensureColumn('orders', 'invoice_number', 'TEXT');
 ensureColumn('orders', 'source', "TEXT NOT NULL DEFAULT 'in-house'");
 ensureColumn('orders', 'table_id', 'INTEGER REFERENCES restaurant_tables(id)');
 db.exec('CREATE INDEX IF NOT EXISTS idx_orders_table_id ON orders(table_id)');
+ensureColumn('order_items', 'kot_fired_at', 'TEXT');
+ensureColumn('orders', 'created_by_staff_id', 'INTEGER REFERENCES staff(id)');
+ensureColumn('orders', 'created_by_name', 'TEXT');
+ensureColumn('orders', 'closed_by_staff_id', 'INTEGER REFERENCES staff(id)');
+ensureColumn('orders', 'closed_by_name', 'TEXT');
+ensureColumn('orders', 'customer_phone', 'TEXT');
+ensureColumn('orders', 'customer_name', 'TEXT');
+// Same reasoning as idx_orders_table_id above: customer_phone is looked up
+// on every keystroke once a phone number is 10 digits (customers:lookup),
+// so an unindexed full table scan there would only get slower as order
+// history grows.
+db.exec('CREATE INDEX IF NOT EXISTS idx_orders_customer_phone ON orders(customer_phone)');
 
 module.exports = db;

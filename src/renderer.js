@@ -6,15 +6,290 @@ let restaurantTables = [];
 let activeCategory = 'all';
 let activeSubcategory = 'all';
 let currentOrder = null; // { id, items: [...], subtotal, tax_amount, discount, total, ... }
-let selectedPaymentMode = null;
+let splitPayments = []; // [{ mode, amount }, ...] while the split-payment section of the payment modal is in use
 let allOrders = [];
 let ordersStatusFilter = 'all';
+let customerSearchQuery = '';
 let viewingHistoricalReceipt = false;
 let currentReceiptOrderId = null; // which order the open receipt modal belongs to, for receipt-print-btn
 let reportsRangeKey = 'today';
 let defaultTaxPercent = 5;
+let currentStaff = null; // { id, name, role } once logged in — mirrors main.js's session, used here only to hide tabs the role can't use; the real access control lives in main.js
+let openShift = null; // the currently open shift row (or null), refreshed after login/open/close
 
 const money = (n) => Number(n || 0).toFixed(2);
+const capitalize = (s) => s.charAt(0).toUpperCase() + s.slice(1);
+
+// ---------------- Staff login / setup ----------------
+// The overlay (#auth-screen) visually covers the whole window until login
+// succeeds — that's a UX gate, not the real access control. The real
+// enforcement is server-side in main.js (requireRole/requireLogin), since a
+// renderer-only lock could be bypassed via DevTools.
+function showAuthError(el, message) {
+  el.textContent = message;
+  el.classList.remove('hidden');
+}
+
+async function initAuth() {
+  // A window reload (Ctrl+R/F5) restarts this script from scratch, but not
+  // the main process — the session actually lives there (see the comment on
+  // staff:whoAmI in main.js), so check it before assuming logged-out.
+  const existing = await window.pos.staff.whoAmI();
+  if (existing) {
+    onLoggedIn(existing);
+    return;
+  }
+  const needsSetup = await window.pos.staff.needsSetup();
+  document.getElementById('auth-setup').classList.toggle('hidden', !needsSetup);
+  document.getElementById('auth-login').classList.toggle('hidden', needsSetup);
+  if (needsSetup) {
+    document.getElementById('setup-name').focus();
+  } else {
+    document.getElementById('login-pin').focus();
+  }
+}
+
+document.getElementById('auth-setup-btn').addEventListener('click', async () => {
+  const errEl = document.getElementById('auth-setup-error');
+  errEl.classList.add('hidden');
+  const name = document.getElementById('setup-name').value.trim();
+  const pin = document.getElementById('setup-pin').value;
+  const pinConfirm = document.getElementById('setup-pin-confirm').value;
+  if (!name) { showAuthError(errEl, 'Enter your name.'); return; }
+  if (!/^\d{4,6}$/.test(pin)) { showAuthError(errEl, 'PIN must be 4-6 digits.'); return; }
+  if (pin !== pinConfirm) { showAuthError(errEl, 'PINs do not match.'); return; }
+  try {
+    const staff = await window.pos.staff.createFirstOwner({ name, pin });
+    onLoggedIn(staff);
+  } catch (err) {
+    showAuthError(errEl, err.message);
+  }
+});
+
+const loginPinInput = document.getElementById('login-pin');
+
+document.querySelectorAll('.auth-key').forEach((btn) => {
+  btn.addEventListener('click', () => {
+    const key = btn.dataset.key;
+    if (key === 'clear') loginPinInput.value = '';
+    else if (key === 'back') loginPinInput.value = loginPinInput.value.slice(0, -1);
+    else if (loginPinInput.value.length < 6) loginPinInput.value += key;
+    loginPinInput.focus();
+  });
+});
+
+loginPinInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') attemptLogin();
+});
+
+document.getElementById('auth-login-btn').addEventListener('click', attemptLogin);
+
+async function attemptLogin() {
+  const errEl = document.getElementById('auth-login-error');
+  errEl.classList.add('hidden');
+  const pin = loginPinInput.value;
+  if (!pin) return;
+  try {
+    const staff = await window.pos.staff.login({ pin });
+    loginPinInput.value = '';
+    onLoggedIn(staff);
+  } catch (err) {
+    loginPinInput.value = '';
+    showAuthError(errEl, err.message);
+    loginPinInput.focus();
+  }
+}
+
+function onLoggedIn(staff) {
+  currentStaff = staff;
+  document.getElementById('auth-screen').classList.add('hidden');
+  document.getElementById('topbar-staff-info').classList.remove('hidden');
+  document.getElementById('topbar-staff-name').textContent = `${staff.name} · ${staff.role}`;
+  applyRolePermissions();
+  document.getElementById('topbar-shift-info').classList.remove('hidden');
+  refreshShiftStatus();
+}
+
+// Hides tabs the current role can't use. This is convenience, not
+// security — see the note at the top of this section.
+function applyRolePermissions() {
+  const role = currentStaff ? currentStaff.role : null;
+  const canManage = role === 'owner' || role === 'manager';
+  const isOwner = role === 'owner';
+  document.querySelector('.tab-btn[data-view="menu"]').classList.toggle('hidden', !canManage);
+  document.querySelector('.tab-btn[data-view="reports"]').classList.toggle('hidden', !canManage);
+  document.querySelector('.tab-btn[data-view="settings"]').classList.toggle('hidden', !isOwner);
+}
+
+// Shared by the Lock button and syncSessionAfterStaffChange() (an owner who
+// deactivates/deletes their OWN account from Staff management ends up here
+// too, not just an explicit Lock click) — resets the topbar and any
+// currently-open modal back to a logged-out state and shows the PIN screen.
+function showLoginScreen() {
+  currentStaff = null;
+  document.getElementById('topbar-staff-info').classList.add('hidden');
+  document.getElementById('topbar-shift-info').classList.add('hidden');
+  document.getElementById('auth-login-error').classList.add('hidden');
+  loginPinInput.value = '';
+  document.querySelectorAll('.modal-backdrop').forEach((m) => m.classList.add('hidden'));
+  switchToView('order');
+  document.getElementById('auth-screen').classList.remove('hidden');
+  document.getElementById('auth-setup').classList.add('hidden');
+  document.getElementById('auth-login').classList.remove('hidden');
+  loginPinInput.focus();
+}
+
+document.getElementById('lock-btn').addEventListener('click', async () => {
+  try {
+    await window.pos.staff.logout();
+  } catch (err) {
+    // Not expected to ever throw, but showLoginScreen() runs regardless —
+    // locking the screen locally is more important than surfacing this.
+  }
+  showLoginScreen();
+});
+
+// Staff management (Settings) can change or end the CURRENTLY logged-in
+// session's own account (self-demotion with another owner present, or
+// self-deactivation/self-deletion) — main.js keeps its own currentStaff in
+// sync server-side, but this renderer's copy and the visible UI (tabs,
+// topbar name) don't know unless something re-checks. Called after every
+// staff:update/staff:delete in the management list.
+async function syncSessionAfterStaffChange() {
+  if (!currentStaff) return;
+  const whoAmI = await window.pos.staff.whoAmI();
+  if (!whoAmI) {
+    showLoginScreen();
+  } else if (whoAmI.role !== currentStaff.role || whoAmI.name !== currentStaff.name) {
+    currentStaff = whoAmI;
+    document.getElementById('topbar-staff-name').textContent = `${whoAmI.name} · ${whoAmI.role}`;
+    applyRolePermissions();
+  }
+}
+
+// ---------------- Shift open/close ----------------
+// The drawer is shared and physical — one shift open at a time for the
+// whole terminal, not per-staff-member, and anyone logged in can open or
+// close it (whoever's at the counter when it needs doing), not just
+// whoever opened it. See shifts.opening_payment_id in schema.sql for how
+// "sales during this shift" is actually computed.
+async function refreshShiftStatus() {
+  openShift = await window.pos.shifts.current();
+  const statusEl = document.getElementById('topbar-shift-status');
+  const actionBtn = document.getElementById('shift-action-btn');
+  if (openShift) {
+    statusEl.textContent = `Shift open · ${escapeHtml(openShift.opened_by_name)} · float ₹${money(openShift.opening_float)}`;
+    actionBtn.textContent = 'Close Shift';
+  } else {
+    statusEl.textContent = 'No shift open';
+    actionBtn.textContent = 'Start Shift';
+  }
+}
+
+document.getElementById('shift-action-btn').addEventListener('click', () => {
+  if (openShift) {
+    openShiftCloseModal();
+  } else {
+    document.getElementById('shift-open-float').value = '0';
+    document.getElementById('shift-open-error').classList.add('hidden');
+    document.getElementById('shift-open-modal').classList.remove('hidden');
+  }
+});
+
+document.getElementById('shift-open-cancel-btn').addEventListener('click', () => {
+  document.getElementById('shift-open-modal').classList.add('hidden');
+});
+
+document.getElementById('shift-open-confirm-btn').addEventListener('click', async () => {
+  const errEl = document.getElementById('shift-open-error');
+  errEl.classList.add('hidden');
+  const openingFloat = Number(document.getElementById('shift-open-float').value);
+  try {
+    await window.pos.shifts.open({ openingFloat });
+    document.getElementById('shift-open-modal').classList.add('hidden');
+    await refreshShiftStatus();
+  } catch (err) {
+    showAuthError(errEl, err.message);
+  }
+});
+
+async function openShiftCloseModal() {
+  const errEl = document.getElementById('shift-close-error');
+  errEl.classList.add('hidden');
+  document.getElementById('shift-close-counted').value = '';
+  document.getElementById('shift-close-notes').value = '';
+  document.getElementById('shift-close-diff').classList.add('hidden');
+
+  let preview;
+  try {
+    preview = await window.pos.shifts.preview();
+  } catch (err) {
+    alert(`Could not load shift summary: ${err.message}`);
+    return;
+  }
+
+  document.getElementById('shift-close-summary').innerHTML = `
+    <div class="receipt-row"><span>Opened by</span><span>${escapeHtml(preview.shift.opened_by_name)} · ${formatOrderDate(preview.shift.opened_at)}</span></div>
+    <div class="receipt-row"><span>Opening float</span><span>₹${money(preview.shift.opening_float)}</span></div>
+    <div class="receipt-row"><span>Cash sales</span><span>₹${money(preview.cashSales)}</span></div>
+    <div class="receipt-row"><span>Card sales</span><span>₹${money(preview.cardSales)}</span></div>
+    <div class="receipt-row"><span>UPI sales</span><span>₹${money(preview.upiSales)}</span></div>
+    <div class="receipt-row"><span>Orders</span><span>${preview.orderCount}</span></div>
+    <div class="receipt-row receipt-total"><span>Expected cash</span><span>₹${money(preview.expectedCash)}</span></div>
+  `;
+  document.getElementById('shift-close-modal').dataset.expectedCash = preview.expectedCash;
+  document.getElementById('shift-close-modal').classList.remove('hidden');
+  document.getElementById('shift-close-counted').focus();
+}
+
+document.getElementById('shift-close-counted').addEventListener('input', (e) => {
+  const diffEl = document.getElementById('shift-close-diff');
+  const expected = Number(document.getElementById('shift-close-modal').dataset.expectedCash);
+  const counted = Number(e.target.value);
+  if (e.target.value === '' || !Number.isFinite(counted)) { diffEl.classList.add('hidden'); return; }
+  const diff = +(counted - expected).toFixed(2);
+  if (Math.abs(diff) < 0.01) {
+    diffEl.textContent = 'Matches exactly.';
+    diffEl.className = 'shift-close-diff';
+  } else if (diff > 0) {
+    diffEl.textContent = `₹${money(diff)} over.`;
+    diffEl.className = 'shift-close-diff shift-diff-over';
+  } else {
+    diffEl.textContent = `₹${money(Math.abs(diff))} short.`;
+    diffEl.className = 'shift-close-diff shift-diff-short';
+  }
+});
+
+document.getElementById('shift-close-cancel-btn').addEventListener('click', () => {
+  document.getElementById('shift-close-modal').classList.add('hidden');
+});
+
+document.getElementById('shift-close-confirm-btn').addEventListener('click', async () => {
+  const errEl = document.getElementById('shift-close-error');
+  errEl.classList.add('hidden');
+  const countedCashRaw = document.getElementById('shift-close-counted').value.trim();
+  const notes = document.getElementById('shift-close-notes').value.trim();
+  // Number('') is 0, not NaN — without this explicit blank check, leaving
+  // the field empty and clicking Close Shift would silently reconcile as
+  // "counted ₹0 in the drawer" instead of rejecting the missing entry
+  // (same class of bug as the Default GST % field, fixed earlier).
+  if (countedCashRaw === '') {
+    showAuthError(errEl, 'Enter the counted cash amount.');
+    return;
+  }
+  const countedCash = Number(countedCashRaw);
+  if (!Number.isFinite(countedCash) || countedCash < 0) {
+    showAuthError(errEl, 'Enter a valid counted cash amount.');
+    return;
+  }
+  try {
+    await window.pos.shifts.close({ countedCash, notes });
+    document.getElementById('shift-close-modal').classList.add('hidden');
+    await refreshShiftStatus();
+  } catch (err) {
+    showAuthError(errEl, err.message);
+  }
+});
 
 // ---------------- View switching ----------------
 const VIEWS = ['order', 'tables', 'orders', 'reports', 'menu', 'settings'];
@@ -207,7 +482,14 @@ function populateBulkGstScopeSelect() {
 }
 
 document.getElementById('bulk-gst-apply-btn').addEventListener('click', async () => {
-  const rate = Number(document.getElementById('bulk-gst-rate').value);
+  const rateInput = document.getElementById('bulk-gst-rate');
+  // Number('') is 0, not NaN — an explicit blank check keeps a cleared
+  // field from silently applying 0% GST to a whole category.
+  if (rateInput.value.trim() === '') {
+    alert('Enter a GST percentage.');
+    return;
+  }
+  const rate = Number(rateInput.value);
   if (isNaN(rate) || rate < 0) {
     alert('Enter a valid GST percentage.');
     return;
@@ -305,21 +587,102 @@ document.getElementById('cancel-order-btn').addEventListener('click', async () =
   }
 });
 
+// Dispatcher for tapping a menu tile: items with modifier groups need a
+// picker first (size/add-ons/etc.), plain items go straight onto the ticket
+// exactly as before this feature existed.
 async function addItemToOrder(menuItem) {
-  await ensureOrder();
+  if (menuItem.modifier_group_count > 0) {
+    await openModifierPicker(menuItem);
+    return;
+  }
+  await addItemToOrderWithModifiers(menuItem, []);
+}
+
+async function addItemToOrderWithModifiers(menuItem, modifierOptionIds) {
   try {
+    await ensureOrder();
     const updatedOrder = await window.pos.orders.addItem({
       orderId: currentOrder.id,
       menuItemId: menuItem.id,
       name: menuItem.name,
       price: menuItem.price,
       quantity: 1,
+      modifierOptionIds,
     });
     await refreshCurrentOrder(updatedOrder);
   } catch (err) {
     alert(`Could not add item: ${err.message}`);
   }
 }
+
+// ---------------- Item modifier picker (Take Order) ----------------
+let modifierPickerItem = null;
+let modifierPickerGroups = [];
+
+async function openModifierPicker(menuItem) {
+  modifierPickerItem = menuItem;
+  try {
+    modifierPickerGroups = await window.pos.modifiers.listGroups(menuItem.id);
+  } catch (err) {
+    alert(`Could not load options: ${err.message}`);
+    modifierPickerItem = null;
+    return;
+  }
+  document.getElementById('item-modifier-picker-title').textContent = menuItem.name;
+  const wrap = document.getElementById('item-modifier-picker-groups');
+  wrap.innerHTML = modifierPickerGroups.map((g) => {
+    // A required single-choice group (min 1, max 1 — e.g. "Size") is a
+    // real radio: exactly one is always selected, nothing to deselect to.
+    // An OPTIONAL single-choice group (min 0, max 1 — "pick one if you
+    // want") still needs checkbox semantics even though at most one may be
+    // checked, because native radios can't be clicked back to unchecked —
+    // the mutual-exclusivity is enforced by the listener wired below instead.
+    const isOptionalSingle = g.min_select === 0 && g.max_select === 1;
+    const inputType = (g.max_select > 1 || isOptionalSingle) ? 'checkbox' : 'radio';
+    const requiredLabel = g.min_select > 0 ? ' (required)' : '';
+    return `
+      <div class="modifier-group" data-group-id="${g.id}" data-optional-single="${isOptionalSingle}">
+        <div class="modifier-group-name">${escapeHtml(g.name)}${requiredLabel}</div>
+        ${g.options.map((o) => `
+          <label class="modifier-option">
+            <input type="${inputType}" name="modifier-group-${g.id}" value="${o.id}" />
+            <span>${escapeHtml(o.name)}</span>
+            ${Number(o.price_delta) !== 0 ? `<span class="modifier-option-price">${Number(o.price_delta) > 0 ? '+' : '−'}₹${money(Math.abs(o.price_delta))}</span>` : ''}
+          </label>
+        `).join('')}
+      </div>
+    `;
+  }).join('');
+  wrap.querySelectorAll('.modifier-group[data-optional-single="true"]').forEach((groupEl) => {
+    const boxes = groupEl.querySelectorAll('input[type="checkbox"]');
+    boxes.forEach((box) => {
+      box.addEventListener('change', () => {
+        if (box.checked) boxes.forEach((other) => { if (other !== box) other.checked = false; });
+      });
+    });
+  });
+  document.getElementById('item-modifier-picker-modal').classList.remove('hidden');
+}
+
+document.getElementById('item-modifier-picker-cancel-btn').addEventListener('click', () => {
+  document.getElementById('item-modifier-picker-modal').classList.add('hidden');
+  modifierPickerItem = null;
+});
+
+document.getElementById('item-modifier-picker-add-btn').addEventListener('click', async () => {
+  for (const g of modifierPickerGroups) {
+    const checked = document.querySelectorAll(`input[name="modifier-group-${g.id}"]:checked`);
+    if (checked.length < g.min_select || checked.length > g.max_select) {
+      alert(`"${g.name}" needs between ${g.min_select} and ${g.max_select} selection(s).`);
+      return;
+    }
+  }
+  const selectedIds = Array.from(document.querySelectorAll('#item-modifier-picker-groups input:checked')).map((el) => Number(el.value));
+  const item = modifierPickerItem;
+  document.getElementById('item-modifier-picker-modal').classList.add('hidden');
+  modifierPickerItem = null;
+  await addItemToOrderWithModifiers(item, selectedIds);
+});
 
 async function refreshCurrentOrder(orderHeader) {
   const full = await window.pos.orders.get(currentOrder.id);
@@ -333,6 +696,7 @@ function renderTicket() {
   const itemsEl = document.getElementById('ticket-items');
   const checkoutBtn = document.getElementById('checkout-btn');
   const cancelOrderBtn = document.getElementById('cancel-order-btn');
+  const kotBtn = document.getElementById('kot-print-btn');
 
   if (!currentOrder) {
     idEl.textContent = '—';
@@ -340,8 +704,14 @@ function renderTicket() {
     cancelOrderBtn.classList.add('hidden');
     setTotals(0, 0, 0, 0);
     checkoutBtn.disabled = true;
+    kotBtn.disabled = true;
+    kotBtn.textContent = 'Send to Kitchen';
     return;
   }
+
+  const unfiredCount = (currentOrder.items || []).filter((i) => !i.kot_fired_at).length;
+  kotBtn.disabled = unfiredCount === 0;
+  kotBtn.textContent = unfiredCount > 0 ? `Send to Kitchen (${unfiredCount})` : 'Send to Kitchen';
 
   cancelOrderBtn.classList.remove('hidden');
   const sourceTag = currentOrder.source && currentOrder.source !== 'in-house' ? ` · ${currentOrder.source}` : '';
@@ -355,8 +725,9 @@ function renderTicket() {
     currentOrder.items.forEach((line) => {
       const row = document.createElement('div');
       row.className = 'ticket-line';
+      const modNames = (line.modifiers || []).map((m) => m.name).join(', ');
       row.innerHTML = `
-        <span class="ticket-line-name">${escapeHtml(line.item_name)}</span>
+        <span class="ticket-line-name">${escapeHtml(line.item_name)}${modNames ? `<span class="ticket-line-modifiers">${escapeHtml(modNames)}</span>` : ''}</span>
         <span class="ticket-line-qty">
           <button class="qty-btn" data-action="dec">&minus;</button>
           <span>${line.quantity}</span>
@@ -394,10 +765,75 @@ async function changeQty(line, newQty) {
 }
 
 document.getElementById('discount-input').addEventListener('change', async (e) => {
-  await ensureOrder();
-  const updated = await window.pos.orders.setDiscount({ orderId: currentOrder.id, discount: Number(e.target.value) });
-  await refreshCurrentOrder(updated);
+  try {
+    await ensureOrder();
+    const updated = await window.pos.orders.setDiscount({ orderId: currentOrder.id, discount: Number(e.target.value) });
+    await refreshCurrentOrder(updated);
+  } catch (err) {
+    alert(`Could not update discount: ${err.message}`);
+  }
 });
+
+document.getElementById('kot-print-btn').addEventListener('click', async () => {
+  if (!currentOrder) return;
+  // Captured from local state before the IPC call, not from its result —
+  // receipt:printKot only returns a count, and by the time it resolves the
+  // backend has already marked these items fired, so this is the only place
+  // that still knows exactly which lines were "new" for this ticket.
+  const unfiredItems = (currentOrder.items || []).filter((i) => !i.kot_fired_at);
+  if (!unfiredItems.length) return;
+  const kotBtn = document.getElementById('kot-print-btn');
+  // Disabled for the duration of the call, same guard pattern as the
+  // payment-mode buttons — receipt:printKot reads "still unfired" and marks
+  // items fired in two separate steps around an await, so a second click
+  // fired before the first call returns would see the same unfired items
+  // and send this ticket to the kitchen twice.
+  kotBtn.disabled = true;
+  try {
+    const result = await window.pos.receipt.printKot({ orderId: currentOrder.id });
+    if (result.mode === 'dialog') {
+      renderKotPrintBody(currentOrder, unfiredItems);
+      document.body.classList.add('printing-kot');
+      window.print();
+      document.body.classList.remove('printing-kot');
+      // Only now mark these items fired (see the comment on receipt:printKot's
+      // 'dialog' branch in main.js) — window.print() has actually returned,
+      // so a cancelled/failed dialog print no longer leaves the items
+      // silently marked as sent when they never really were.
+      await window.pos.receipt.confirmKotPrinted({ itemIds: result.itemIds });
+    }
+    // refreshCurrentOrder() re-renders the ticket, which sets kotBtn.disabled
+    // from the fresh unfired-item count — nothing left to do here on success.
+    await refreshCurrentOrder(currentOrder);
+  } catch (err) {
+    // Nothing changed: these items are still unfired, so it's safe (and
+    // necessary) to let the user retry.
+    kotBtn.disabled = false;
+    alert(`Could not send to kitchen: ${err.message}`);
+  }
+});
+
+function renderKotPrintBody(order, items) {
+  const body = document.getElementById('kot-print-body');
+  const typeValue = `${order.order_type}${order.table_label ? ' · ' + order.table_label : ''}`;
+  const itemsHtml = items.map((i) => {
+    const modNames = (i.modifiers || []).map((m) => m.name).join(', ');
+    return `
+    <div class="kot-print-item">
+      <div class="kot-print-item-row"><span>${escapeHtml(i.item_name)}</span><span>x${i.quantity}</span></div>
+      ${modNames ? `<div class="kot-print-item-notes">${escapeHtml(modNames)}</div>` : ''}
+      ${i.notes ? `<div class="kot-print-item-notes">${escapeHtml(i.notes)}</div>` : ''}
+    </div>
+  `;
+  }).join('');
+  body.innerHTML = `
+    <div class="kot-print-title">KITCHEN ORDER TICKET</div>
+    <div class="kot-print-meta">${escapeHtml(typeValue)} · Order #${order.id}</div>
+    <div class="kot-print-meta">${new Date().toLocaleString()}</div>
+    <hr>
+    ${itemsHtml}
+  `;
+}
 
 // ---------------- Tables ----------------
 async function loadTables() {
@@ -517,6 +953,11 @@ async function loadOrdersList() {
   renderOrdersTable();
 }
 
+document.getElementById('orders-customer-search').addEventListener('input', (e) => {
+  customerSearchQuery = e.target.value.trim();
+  renderOrdersTable();
+});
+
 function renderOrdersFilter() {
   const wrap = document.getElementById('orders-filter');
   wrap.innerHTML = '';
@@ -541,19 +982,28 @@ function formatOrderDate(timestamp) {
 function renderOrdersTable() {
   const tbody = document.getElementById('orders-table-body');
   tbody.innerHTML = '';
-  const orders = allOrders.filter((o) => ordersStatusFilter === 'all' || o.status === ordersStatusFilter);
+  const searchDigits = customerSearchQuery.replace(/\D/g, '');
+  const orders = allOrders.filter((o) => {
+    if (ordersStatusFilter !== 'all' && o.status !== ordersStatusFilter) return false;
+    if (searchDigits && !(o.customer_phone || '').includes(searchDigits)) return false;
+    return true;
+  });
 
   if (orders.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="8" class="category-manage-empty">No orders yet.</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="9" class="category-manage-empty">No orders yet.</td></tr>';
     return;
   }
 
   orders.forEach((o) => {
     const tr = document.createElement('tr');
+    const customerText = o.customer_name || o.customer_phone
+      ? `${escapeHtml(o.customer_name || '')}${o.customer_name && o.customer_phone ? ' · ' : ''}${escapeHtml(o.customer_phone || '')}`
+      : '—';
     tr.innerHTML = `
       <td>#${o.id}</td>
       <td>${escapeHtml(o.order_type)}</td>
       <td>${escapeHtml(o.table_label || '—')}</td>
+      <td>${customerText}</td>
       <td>${o.source && o.source !== 'in-house' ? `<span class="status-pill source-${escapeHtml(o.source)}">${escapeHtml(o.source)}</span>` : '—'}</td>
       <td><span class="status-pill ${o.status}">${escapeHtml(o.status)}</span></td>
       <td>₹${money(o.total)}</td>
@@ -742,6 +1192,42 @@ async function loadReports() {
   renderReportKpis(data);
   renderBarList('reports-top-items', data.topItems, (r) => `₹${money(r.revenue)}`, (r) => `· ${r.quantity} sold`);
   renderBarList('reports-by-category', data.byCategory, (r) => `₹${money(r.revenue)}`);
+  await renderShiftHistory();
+}
+
+async function renderShiftHistory() {
+  const tbody = document.getElementById('shift-history-body');
+  let shifts;
+  try {
+    shifts = await window.pos.shifts.history();
+  } catch (err) {
+    tbody.innerHTML = `<tr><td colspan="11" class="category-manage-empty">${escapeHtml(err.message)}</td></tr>`;
+    return;
+  }
+  if (!shifts.length) {
+    tbody.innerHTML = '<tr><td colspan="11" class="category-manage-empty">No closed shifts yet.</td></tr>';
+    return;
+  }
+  tbody.innerHTML = shifts.map((s) => {
+    const diff = +(Number(s.counted_cash) - Number(s.expected_cash)).toFixed(2);
+    const diffClass = Math.abs(diff) < 0.01 ? '' : diff > 0 ? 'shift-diff-over' : 'shift-diff-short';
+    const diffText = Math.abs(diff) < 0.01 ? '—' : `${diff > 0 ? '+' : ''}₹${money(diff)}`;
+    return `
+      <tr>
+        <td>${formatOrderDate(s.opened_at)}</td>
+        <td>${formatOrderDate(s.closed_at)}</td>
+        <td>${escapeHtml(s.opened_by_name || '—')}</td>
+        <td>${escapeHtml(s.closed_by_name || '—')}</td>
+        <td>₹${money(s.opening_float)}</td>
+        <td>₹${money(s.cash_sales)}</td>
+        <td>₹${money(s.card_sales)}</td>
+        <td>₹${money(s.upi_sales)}</td>
+        <td>₹${money(s.expected_cash)}</td>
+        <td>₹${money(s.counted_cash)}</td>
+        <td class="${diffClass}">${diffText}</td>
+      </tr>
+    `;
+  }).join('');
 }
 
 async function viewReceipt(orderId) {
@@ -758,9 +1244,45 @@ const paymentModal = document.getElementById('payment-modal');
 const receiptModal = document.getElementById('receipt-modal');
 
 document.getElementById('checkout-btn').addEventListener('click', () => {
-  selectedPaymentMode = null;
   document.querySelectorAll('.payment-mode-btn').forEach((b) => b.classList.remove('selected'));
+  splitPayments = [];
+  document.getElementById('split-payment-section').classList.add('hidden');
+  document.querySelector('.payment-modes').classList.remove('hidden');
+  document.getElementById('split-payment-toggle-btn').textContent = 'Split payment instead';
+  renderSplitPaymentList();
+  document.getElementById('payment-customer-phone').value = '';
+  document.getElementById('payment-customer-name').value = '';
+  document.getElementById('payment-customer-hint').classList.add('hidden');
   paymentModal.classList.remove('hidden');
+});
+
+// Looks up whether this phone number has ordered before — called on blur
+// (covers any format) and as soon as 10 digits are typed (immediate
+// feedback for the common India-mobile case, without waiting for blur).
+async function lookupCustomerByPhone() {
+  const phoneInput = document.getElementById('payment-customer-phone');
+  const nameInput = document.getElementById('payment-customer-name');
+  const hint = document.getElementById('payment-customer-hint');
+  const phone = phoneInput.value.trim();
+  if (!phone) { hint.classList.add('hidden'); return; }
+  try {
+    const found = await window.pos.customers.lookup(phone);
+    if (found) {
+      if (found.name && !nameInput.value.trim()) nameInput.value = found.name;
+      const who = found.name || 'this customer';
+      hint.textContent = `Welcome back, ${who} — ${found.visitCount} previous order${found.visitCount === 1 ? '' : 's'}.`;
+      hint.classList.remove('hidden');
+    } else {
+      hint.classList.add('hidden');
+    }
+  } catch (err) {
+    hint.classList.add('hidden');
+  }
+}
+
+document.getElementById('payment-customer-phone').addEventListener('blur', lookupCustomerByPhone);
+document.getElementById('payment-customer-phone').addEventListener('input', (e) => {
+  if (e.target.value.replace(/\D/g, '').length === 10) lookupCustomerByPhone();
 });
 
 document.getElementById('payment-cancel-btn').addEventListener('click', () => {
@@ -772,19 +1294,81 @@ document.querySelectorAll('.payment-mode-btn').forEach((btn) => {
     const allModeBtns = document.querySelectorAll('.payment-mode-btn');
     allModeBtns.forEach((b) => { b.classList.remove('selected'); b.disabled = true; });
     btn.classList.add('selected');
-    selectedPaymentMode = btn.dataset.mode;
     try {
-      await finalizeOrder();
+      await finalizeOrder({ paymentMode: btn.dataset.mode });
     } finally {
       allModeBtns.forEach((b) => { b.disabled = false; });
     }
   });
 });
 
-async function finalizeOrder() {
-  viewingHistoricalReceipt = false;
+document.getElementById('split-payment-toggle-btn').addEventListener('click', () => {
+  const splitSection = document.getElementById('split-payment-section');
+  const quickModes = document.querySelector('.payment-modes');
+  const toggleBtn = document.getElementById('split-payment-toggle-btn');
+  const showingSplit = !splitSection.classList.contains('hidden');
+  splitSection.classList.toggle('hidden', showingSplit);
+  quickModes.classList.toggle('hidden', !showingSplit);
+  toggleBtn.textContent = showingSplit ? 'Split payment instead' : 'Use a single payment method instead';
+});
+
+document.getElementById('split-payment-add-btn').addEventListener('click', () => {
+  const mode = document.getElementById('split-payment-mode').value;
+  const amountInput = document.getElementById('split-payment-amount');
+  const amount = Number(amountInput.value);
+  const paid = splitPayments.reduce((sum, p) => sum + p.amount, 0);
+  const remaining = +(Number(currentOrder.total) - paid).toFixed(2);
+  if (!Number.isFinite(amount) || amount <= 0) { alert('Enter a valid amount.'); return; }
+  // A small epsilon, not an exact <= remaining check, so a remaining of e.g.
+  // 149.999999999998 from prior float additions doesn't reject a ₹150 entry
+  // that's actually correct to the paisa.
+  if (amount > remaining + 0.01) { alert(`Amount exceeds the remaining ₹${money(remaining)}.`); return; }
+  splitPayments.push({ mode, amount: +amount.toFixed(2) });
+  amountInput.value = '';
+  renderSplitPaymentList();
+});
+
+function renderSplitPaymentList() {
+  const list = document.getElementById('split-payment-list');
+  const remainingEl = document.getElementById('split-payment-remaining');
+  const chargeBtn = document.getElementById('split-payment-charge-btn');
+
+  list.innerHTML = splitPayments.map((p, idx) => `
+    <div class="split-payment-row">
+      <span>${escapeHtml(capitalize(p.mode))}</span>
+      <span>₹${money(p.amount)}</span>
+      <button type="button" class="link-btn danger" data-idx="${idx}">Remove</button>
+    </div>
+  `).join('');
+  list.querySelectorAll('[data-idx]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      splitPayments.splice(Number(btn.dataset.idx), 1);
+      renderSplitPaymentList();
+    });
+  });
+
+  const paid = splitPayments.reduce((sum, p) => sum + p.amount, 0);
+  const remaining = +(Number(currentOrder ? currentOrder.total : 0) - paid).toFixed(2);
+  remainingEl.textContent = money(Math.max(remaining, 0));
+  chargeBtn.disabled = !(Math.abs(remaining) < 0.01 && splitPayments.length > 0);
+}
+
+document.getElementById('split-payment-charge-btn').addEventListener('click', async () => {
+  const chargeBtn = document.getElementById('split-payment-charge-btn');
+  chargeBtn.disabled = true;
   try {
-    await window.pos.billing.finalize({ orderId: currentOrder.id, paymentMode: selectedPaymentMode });
+    await finalizeOrder({ payments: splitPayments });
+  } finally {
+    chargeBtn.disabled = false;
+  }
+});
+
+async function finalizeOrder(payload) {
+  viewingHistoricalReceipt = false;
+  const customerPhone = document.getElementById('payment-customer-phone').value.trim();
+  const customerName = document.getElementById('payment-customer-name').value.trim();
+  try {
+    await window.pos.billing.finalize({ orderId: currentOrder.id, customerPhone, customerName, ...payload });
     currentReceiptOrderId = currentOrder.id;
     const receipt = await window.pos.billing.getReceipt(currentOrder.id);
     renderReceipt(receipt);
@@ -817,17 +1401,21 @@ function renderReceipt(order) {
       <div class="receipt-row"><span>Date</span><span>${dateStr}</span></div>
       <div class="receipt-row"><span>Type</span><span>${escapeHtml(order.order_type)}${order.table_label ? ' · ' + escapeHtml(order.table_label) : ''}</span></div>
       ${order.source === 'zomato' ? `<div class="receipt-row"><span>Source</span><span>Zomato${business.zomatoRestaurantId ? ' · ' + escapeHtml(business.zomatoRestaurantId) : ''}</span></div>` : ''}
+      ${order.customer_name || order.customer_phone ? `<div class="receipt-row"><span>Customer</span><span>${escapeHtml(order.customer_name || '')}${order.customer_name && order.customer_phone ? ' · ' : ''}${escapeHtml(order.customer_phone || '')}</span></div>` : ''}
     </div>
   `;
 
-  const itemsRows = order.items.map((i) => `
+  const itemsRows = order.items.map((i) => {
+    const modNames = (i.modifiers || []).map((m) => m.name).join(', ');
+    return `
     <tr>
-      <td>${escapeHtml(i.item_name)}</td>
+      <td>${escapeHtml(i.item_name)}${modNames ? `<div class="receipt-item-modifiers">${escapeHtml(modNames)}</div>` : ''}</td>
       <td>${i.quantity}</td>
       <td>${money(i.unit_price)}</td>
       <td>${money(i.unit_price * i.quantity)}</td>
     </tr>
-  `).join('');
+  `;
+  }).join('');
   const itemsHtml = `
     <div class="receipt-section-title">Items</div>
     <table class="receipt-items-table">
@@ -861,7 +1449,10 @@ function renderReceipt(order) {
     </table>
   ` : '';
 
-  const paymentHtml = order.payment_mode ? `<div style="margin-top:8px;">Paid via ${escapeHtml(order.payment_mode)}</div>` : '';
+  const paymentText = order.payments && order.payments.length > 1
+    ? 'Paid via: ' + order.payments.map((p) => `${capitalize(p.mode)} ₹${money(p.amount)}`).join(', ')
+    : order.payment_mode ? `Paid via ${order.payment_mode}` : '';
+  const paymentHtml = paymentText ? `<div style="margin-top:8px;">${escapeHtml(paymentText)}</div>` : '';
 
   const qrHtml = order.qrDataUrl ? `
     <div class="receipt-qr">
@@ -924,17 +1515,22 @@ document.getElementById('item-cancel-btn').addEventListener('click', () => itemM
 
 document.getElementById('item-save-btn').addEventListener('click', async () => {
   const subcategoryValue = document.getElementById('item-subcategory').value;
+  const priceRaw = document.getElementById('item-price').value.trim();
+  const gstRateRaw = document.getElementById('item-gst-rate').value.trim();
   const payload = {
     id: editingItemId,
     name: document.getElementById('item-name').value.trim(),
-    price: Number(document.getElementById('item-price').value),
+    price: Number(priceRaw),
     categoryId: Number(document.getElementById('item-category').value),
     subcategoryId: subcategoryValue ? Number(subcategoryValue) : null,
     hsnCode: document.getElementById('item-hsn-code').value.trim(),
-    gstRate: Number(document.getElementById('item-gst-rate').value),
+    gstRate: Number(gstRateRaw),
     isAvailable: document.getElementById('item-available').checked,
   };
-  if (!payload.name || isNaN(payload.price) || isNaN(payload.gstRate)) return;
+  // Number('') is 0, not NaN — without the blank checks below, clearing
+  // Price or GST % and saving would silently create a free (₹0) or
+  // 0%-taxed item instead of being rejected.
+  if (!payload.name || priceRaw === '' || gstRateRaw === '' || isNaN(payload.price) || isNaN(payload.gstRate)) return;
 
   if (editingItemId) {
     await window.pos.menu.update(payload);
@@ -962,10 +1558,12 @@ function renderItemTable() {
       <td><span class="status-pill ${item.is_available ? 'available' : 'unavailable'}">${item.is_available ? 'Available' : 'Unavailable'}</span></td>
       <td><div class="row-actions">
         <button class="link-btn" data-action="edit">Edit</button>
+        <button class="link-btn" data-action="modifiers">Modifiers</button>
         <button class="link-btn danger" data-action="delete">Delete</button>
       </div></td>
     `;
     tr.querySelector('[data-action="edit"]').addEventListener('click', () => openItemModal(item));
+    tr.querySelector('[data-action="modifiers"]').addEventListener('click', () => openModifierManageModal(item));
     tr.querySelector('[data-action="delete"]').addEventListener('click', async () => {
       if (!confirm(`Delete "${item.name}"?`)) return;
       await window.pos.menu.delete(item.id);
@@ -982,6 +1580,116 @@ function renderItemTable() {
     tbody.appendChild(tr);
   });
 }
+
+// ---------------- Item modifier management (Menu) ----------------
+let modifierManageItem = null;
+
+async function openModifierManageModal(item) {
+  modifierManageItem = item;
+  document.getElementById('item-modifier-manage-title').textContent = `Modifiers — ${item.name}`;
+  await renderModifierManageGroups();
+  document.getElementById('item-modifier-manage-modal').classList.remove('hidden');
+}
+
+async function renderModifierManageGroups() {
+  const groups = await window.pos.modifiers.listGroups(modifierManageItem.id);
+  const wrap = document.getElementById('item-modifier-manage-groups');
+  if (!groups.length) {
+    wrap.innerHTML = '<p class="category-manage-empty">No modifier groups yet — add one below.</p>';
+  } else {
+    wrap.innerHTML = '';
+    groups.forEach((g) => {
+      const card = document.createElement('div');
+      card.className = 'modifier-manage-group';
+      card.innerHTML = `
+        <div class="modifier-manage-group-head">
+          <span class="modifier-manage-group-name">${escapeHtml(g.name)} <span class="modifier-manage-group-range">(select ${g.min_select}-${g.max_select})</span></span>
+          <button class="link-btn danger" data-action="delete-group">Delete group</button>
+        </div>
+        <div class="modifier-manage-options"></div>
+        <div class="modifier-manage-add-option">
+          <input type="text" class="modifier-option-name-input" placeholder="Option name" />
+          <input type="number" class="modifier-option-price-input" step="0.01" placeholder="+/- price" value="0" />
+          <button class="link-btn" data-action="add-option">Add option</button>
+        </div>
+      `;
+      const optionsWrap = card.querySelector('.modifier-manage-options');
+      g.options.forEach((o) => {
+        const row = document.createElement('div');
+        row.className = 'modifier-manage-option-row';
+        row.innerHTML = `
+          <span>${escapeHtml(o.name)}</span>
+          <span>${Number(o.price_delta) > 0 ? '+' : ''}₹${money(o.price_delta)}</span>
+          <button class="link-btn danger" data-action="delete-option">Remove</button>
+        `;
+        row.querySelector('[data-action="delete-option"]').addEventListener('click', async () => {
+          try {
+            await window.pos.modifiers.deleteOption(o.id);
+          } catch (err) {
+            alert(`Could not remove option: ${err.message}`);
+          }
+          await renderModifierManageGroups();
+        });
+        optionsWrap.appendChild(row);
+      });
+      card.querySelector('[data-action="delete-group"]').addEventListener('click', async () => {
+        if (!confirm(`Delete modifier group "${g.name}" and all its options?`)) return;
+        try {
+          await window.pos.modifiers.deleteGroup(g.id);
+        } catch (err) {
+          alert(`Could not delete group: ${err.message}`);
+        }
+        await renderModifierManageGroups();
+      });
+      card.querySelector('[data-action="add-option"]').addEventListener('click', async () => {
+        const nameInput = card.querySelector('.modifier-option-name-input');
+        const priceInput = card.querySelector('.modifier-option-price-input');
+        const name = nameInput.value.trim();
+        if (!name) { alert('Enter an option name.'); return; }
+        try {
+          await window.pos.modifiers.addOption({ groupId: g.id, name, priceDelta: Number(priceInput.value) || 0 });
+          await renderModifierManageGroups();
+        } catch (err) {
+          alert(`Could not add option: ${err.message}`);
+        }
+      });
+      wrap.appendChild(card);
+    });
+  }
+  // Refreshes modifier_group_count on the in-memory menu list too, so Take
+  // Order immediately knows whether tapping this item should open the
+  // picker — without this, adding an item's first group wouldn't take
+  // effect there until some unrelated reload.
+  menuItems = await window.pos.menu.list();
+  renderMenuGrid();
+}
+
+document.getElementById('add-modifier-group-btn').addEventListener('click', async () => {
+  const nameInput = document.getElementById('new-modifier-group-name');
+  const minInput = document.getElementById('new-modifier-group-min');
+  const maxInput = document.getElementById('new-modifier-group-max');
+  const name = nameInput.value.trim();
+  if (!name) { alert('Enter a group name.'); return; }
+  try {
+    await window.pos.modifiers.addGroup({
+      menuItemId: modifierManageItem.id,
+      name,
+      minSelect: Number(minInput.value) || 0,
+      maxSelect: Number(maxInput.value) || 1,
+    });
+    nameInput.value = '';
+    minInput.value = '0';
+    maxInput.value = '1';
+    await renderModifierManageGroups();
+  } catch (err) {
+    alert(`Could not add group: ${err.message}`);
+  }
+});
+
+document.getElementById('item-modifier-manage-close-btn').addEventListener('click', () => {
+  document.getElementById('item-modifier-manage-modal').classList.add('hidden');
+  modifierManageItem = null;
+});
 
 // ---------------- Settings ----------------
 async function loadSettings() {
@@ -1004,6 +1712,7 @@ async function loadSettings() {
   document.getElementById('settings-printer-network-port').value = settings.printerNetworkPort;
   await loadSystemPrinters(settings.printerSystemName);
   updatePrinterModeVisibility();
+  await renderStaffManageList();
 }
 
 // Populates the system-printer <select> from printers:listSystem. Pass
@@ -1074,7 +1783,15 @@ document.getElementById('settings-printer-test-btn').addEventListener('click', a
 
 document.getElementById('settings-save-btn').addEventListener('click', async () => {
   const btn = document.getElementById('settings-save-btn');
-  const defaultTaxValue = Number(document.getElementById('settings-tax-input').value);
+  const defaultTaxInput = document.getElementById('settings-tax-input').value.trim();
+  // Number('') is 0, not NaN — without this explicit blank check, clearing
+  // the field entirely would silently save a 0% default instead of
+  // rejecting the save like every other invalid entry does.
+  if (defaultTaxInput === '') {
+    alert('Default GST % is required.');
+    return;
+  }
+  const defaultTaxValue = Number(defaultTaxInput);
   if (isNaN(defaultTaxValue) || defaultTaxValue < 0) {
     alert('Enter a valid GST percentage.');
     return;
@@ -1109,6 +1826,133 @@ document.getElementById('settings-save-btn').addEventListener('click', async () 
   }
 });
 
+// ---------------- Staff management (Settings, owner only) ----------------
+async function renderStaffManageList() {
+  const list = document.getElementById('staff-manage-list');
+  let staffRows;
+  try {
+    staffRows = await window.pos.staff.list();
+  } catch (err) {
+    // Not an owner (or somehow not logged in) — the Settings tab is already
+    // hidden for everyone else, so reaching this is only a defensive path.
+    list.innerHTML = `<p class="category-manage-empty">${escapeHtml(err.message)}</p>`;
+    return;
+  }
+  if (!staffRows.length) {
+    list.innerHTML = '<p class="category-manage-empty">No staff yet — add one below.</p>';
+    return;
+  }
+  list.innerHTML = '';
+  staffRows.forEach((s) => {
+    const row = document.createElement('div');
+    row.className = 'category-manage-row staff-manage-row';
+    row.innerHTML = `
+      <span class="category-manage-name">${escapeHtml(s.name)}</span>
+      ${!s.isActive ? '<span class="staff-inactive-tag">Inactive</span>' : ''}
+      <select class="staff-role-select" data-action="role"></select>
+      <button class="link-btn" data-action="reset-pin">Reset PIN</button>
+      <button class="link-btn" data-action="toggle-active">${s.isActive ? 'Deactivate' : 'Reactivate'}</button>
+      <button class="link-btn danger" data-action="delete">Delete</button>
+    `;
+
+    const roleSelect = row.querySelector('[data-action="role"]');
+    ['owner', 'manager', 'staff'].forEach((r) => {
+      const opt = document.createElement('option');
+      opt.value = r;
+      opt.textContent = capitalize(r);
+      if (r === s.role) opt.selected = true;
+      roleSelect.appendChild(opt);
+    });
+    roleSelect.addEventListener('change', async () => {
+      try {
+        await window.pos.staff.update({ id: s.id, role: roleSelect.value });
+        await syncSessionAfterStaffChange();
+      } catch (err) {
+        alert(`Could not change role: ${err.message}`);
+      }
+      await renderStaffManageList();
+    });
+
+    row.querySelector('[data-action="reset-pin"]').addEventListener('click', () => {
+      openStaffPinModal(s);
+    });
+
+    row.querySelector('[data-action="toggle-active"]').addEventListener('click', async () => {
+      try {
+        await window.pos.staff.update({ id: s.id, isActive: !s.isActive });
+        await syncSessionAfterStaffChange();
+      } catch (err) {
+        alert(`Could not update status: ${err.message}`);
+      }
+      await renderStaffManageList();
+    });
+
+    row.querySelector('[data-action="delete"]').addEventListener('click', async () => {
+      if (!confirm(`Delete staff account "${s.name}"? This can't be undone — past orders keep their attribution either way.`)) return;
+      try {
+        await window.pos.staff.delete(s.id);
+        await syncSessionAfterStaffChange();
+      } catch (err) {
+        alert(`Could not delete: ${err.message}`);
+      }
+      await renderStaffManageList();
+    });
+
+    list.appendChild(row);
+  });
+}
+
+let pinResetStaff = null;
+
+function openStaffPinModal(staff) {
+  pinResetStaff = staff;
+  document.getElementById('staff-pin-modal-title').textContent = `Reset PIN — ${staff.name}`;
+  document.getElementById('staff-pin-new').value = '';
+  document.getElementById('staff-pin-confirm').value = '';
+  document.getElementById('staff-pin-error').classList.add('hidden');
+  document.getElementById('staff-pin-modal').classList.remove('hidden');
+  document.getElementById('staff-pin-new').focus();
+}
+
+document.getElementById('staff-pin-cancel-btn').addEventListener('click', () => {
+  document.getElementById('staff-pin-modal').classList.add('hidden');
+  pinResetStaff = null;
+});
+
+document.getElementById('staff-pin-save-btn').addEventListener('click', async () => {
+  const errEl = document.getElementById('staff-pin-error');
+  errEl.classList.add('hidden');
+  const newPin = document.getElementById('staff-pin-new').value;
+  const confirmPin = document.getElementById('staff-pin-confirm').value;
+  if (!/^\d{4,6}$/.test(newPin)) { showAuthError(errEl, 'PIN must be 4-6 digits.'); return; }
+  if (newPin !== confirmPin) { showAuthError(errEl, 'PINs do not match.'); return; }
+  try {
+    await window.pos.staff.update({ id: pinResetStaff.id, pin: newPin });
+    document.getElementById('staff-pin-modal').classList.add('hidden');
+    pinResetStaff = null;
+  } catch (err) {
+    showAuthError(errEl, err.message);
+  }
+});
+
+document.getElementById('add-staff-btn').addEventListener('click', async () => {
+  const nameInput = document.getElementById('new-staff-name');
+  const pinInput = document.getElementById('new-staff-pin');
+  const roleSelect = document.getElementById('new-staff-role');
+  const name = nameInput.value.trim();
+  const pin = pinInput.value;
+  if (!name) { alert('Enter a name.'); return; }
+  try {
+    await window.pos.staff.add({ name, pin, role: roleSelect.value });
+    nameInput.value = '';
+    pinInput.value = '';
+    roleSelect.value = 'staff';
+    await renderStaffManageList();
+  } catch (err) {
+    alert(`Could not add staff: ${err.message}`);
+  }
+});
+
 // ---------------- Utils ----------------
 function escapeHtml(str) {
   const div = document.createElement('div');
@@ -1119,3 +1963,4 @@ function escapeHtml(str) {
 // ---------------- Init ----------------
 loadReferenceData();
 renderTicket();
+initAuth();

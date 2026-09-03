@@ -84,6 +84,10 @@ button, input, select {
 }
 
 .topbar-spacer { flex: 1; }
+.topbar-shift-info { display: flex; align-items: center; gap: 12px; padding-right: 20px; border-right: 1px solid var(--line); }
+.topbar-shift-status { color: var(--text-on-ink-dim); font-size: 13px; }
+.topbar-staff-info { display: flex; align-items: center; gap: 12px; }
+.topbar-staff-name { color: var(--text-on-ink-dim); font-size: 13px; }
 
 /* ---------------- Take Order view ---------------- */
 #view-order {
@@ -172,6 +176,9 @@ button, input, select {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
   gap: 12px;
+}
+#tables-grid {
+  margin-bottom: 20px;
 }
 
 .menu-tile {
@@ -273,7 +280,8 @@ button, input, select {
   font-size: 13px;
 }
 .ticket-line-name { line-height: 1.35; }
-.ticket-line-notes {
+.ticket-line-notes,
+.ticket-line-modifiers {
   display: block;
   font-size: 11px;
   color: var(--text-on-paper-dim);
@@ -389,13 +397,42 @@ button, input, select {
 .category-manage-group {
   display: flex;
   align-items: flex-end;
+  flex-wrap: wrap;
   gap: 10px;
 }
+/* Flex items don't shrink below their content's min-width by default —
+   .context-field input's own min-width: 140px (sized for a text field) is
+   excessive for a 1-2 digit number stepper, and three of them plus a
+   button add up to more than a modal's content width. Without this, the
+   row overflows and — since .modal doesn't clip — the last item (usually
+   the button) visually escapes the card entirely instead of wrapping. */
+.category-manage-group input[type="number"] { min-width: 70px; }
+
+/* Grid, not flex, for this one: three fields + a button in a 420px modal
+   was still overflowing even with the flex-wrap/narrower-number-input
+   fixes above (min-width fights are fragile at this margin) — an explicit
+   grid track can't overflow its container by construction, since 1fr is
+   defined as "remaining space after the fixed tracks", never negative. */
+.modifier-new-group-form { margin-top: 4px; }
+.modifier-new-group-fields {
+  display: grid;
+  grid-template-columns: 1fr 80px 80px;
+  gap: 10px;
+  align-items: end;
+  margin-bottom: 12px;
+}
+.modifier-new-group-fields input { width: 100%; min-width: 0; }
 #add-category-btn.btn-ghost,
 #add-subcategory-btn.btn-ghost,
 #bulk-gst-apply-btn.btn-ghost,
 #reports-export-btn.btn-ghost,
-#settings-save-btn.btn-ghost {
+#settings-save-btn.btn-ghost,
+#add-table-btn.btn-ghost,
+#settings-printer-refresh-btn.btn-ghost,
+#settings-printer-test-btn.btn-ghost,
+#lock-btn.btn-ghost,
+#add-staff-btn.btn-ghost,
+#shift-action-btn.btn-ghost {
   border-color: var(--line);
   color: var(--text-on-ink);
 }
@@ -422,7 +459,17 @@ button, input, select {
   grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
   gap: 14px;
   margin-top: 14px;
+  margin-bottom: 14px;
 }
+/* Buttons default to inline-block, which never collapses with a block
+   sibling's margin — so the gap above this button is .settings-grid's
+   margin-bottom (14px, from whichever grid ends up directly before it:
+   the base mode+width one in dialog mode, or the conditionally-shown
+   system/network one) *plus* this margin-top, not the max of the two.
+   10 + 14 = 24px total, matching .settings-section's own margin-bottom —
+   the spacing this file already uses to separate one action from the next,
+   rather than the tighter 14px rhythm used between field rows. */
+#settings-printer-test-btn { margin-top: 10px; }
 .settings-field-wide { grid-column: 1 / -1; }
 
 .category-manage-list {
@@ -484,6 +531,30 @@ button, input, select {
   color: var(--text-on-ink);
   padding: 8px 10px;
   border-radius: 5px;
+}
+
+.orders-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-end;
+  flex-wrap: wrap;
+  gap: 16px;
+  margin-bottom: 16px;
+}
+.orders-customer-search {
+  background: var(--ink-soft);
+  border: 1px solid var(--line);
+  color: var(--text-on-ink);
+  padding: 8px 10px;
+  border-radius: 5px;
+  min-width: 220px;
+}
+
+.payment-customer { margin-bottom: 14px; }
+.payment-customer-hint {
+  font-size: 12px;
+  color: var(--sage);
+  margin: 6px 0 0;
 }
 .kpi-row {
   display: flex;
@@ -659,6 +730,31 @@ button, input, select {
 .payment-mode-btn { flex: 1; }
 .payment-mode-btn.selected { background: var(--copper); color: var(--ink); border-color: var(--copper); }
 
+#split-payment-toggle-btn { display: block; margin: 0 0 6px; }
+.split-payment { margin-bottom: 14px; }
+.split-payment-add { display: flex; gap: 8px; margin-bottom: 10px; }
+.split-payment-add select { flex: 0 0 90px; }
+.split-payment-add input { flex: 1; min-width: 0; }
+.split-payment-list { display: flex; flex-direction: column; gap: 6px; margin-bottom: 8px; }
+.split-payment-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 10px;
+  background: var(--paper-dim);
+  border-radius: 6px;
+  font-size: 13px;
+}
+.split-payment-remaining {
+  display: flex;
+  justify-content: space-between;
+  font-weight: 600;
+  padding-top: 8px;
+  border-top: 1px dashed var(--line-on-paper);
+  margin-bottom: 12px;
+}
+
 .receipt-modal { width: 300px; }
 .receipt-modal .modal-actions .btn-block {
   flex: 1;
@@ -674,13 +770,33 @@ button, input, select {
   padding: 12px 0;
   max-height: 300px;
   overflow-y: auto;
+  /* Explicit, not just "not set": leaving this as the overflow-y-only
+     default makes the UA compute overflow-x as auto too (per the CSS
+     overflow spec, when one axis is non-visible the other can't stay
+     visible) — content that overflows horizontally (see .receipt-row
+     below) then becomes scrollable instead of wrapping, and the
+     text-align:center header renders centered within that wider
+     scrollable area, clipping its right side in the visible viewport. */
+  overflow-x: hidden;
 }
-.receipt-row { display: flex; justify-content: space-between; }
+.receipt-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+}
+/* Flex items default to min-width:auto, i.e. never shrink below their own
+   content's width — without this, a long unbroken value like an invoice
+   number or GSTIN just overflows the 252px-wide modal instead of wrapping. */
+.receipt-row span:last-child {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  text-align: right;
+}
 .receipt-total { font-weight: 600; margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--line-on-paper); }
 
 .receipt-header { text-align: center; margin-bottom: 8px; }
 .receipt-business-name { font-weight: 700; font-size: 14px; }
-.receipt-header div { font-size: 11px; }
+.receipt-header div { font-size: 11px; overflow-wrap: anywhere; }
 .receipt-meta { margin-bottom: 6px; }
 .receipt-section-title {
   font-weight: 700;
@@ -702,10 +818,79 @@ button, input, select {
 .receipt-items-table th:first-child, .receipt-items-table td:first-child,
 .receipt-gst-table th:first-child, .receipt-gst-table td:first-child {
   text-align: left;
+  overflow-wrap: anywhere;
 }
+.receipt-item-modifiers { font-size: 9px; font-style: italic; color: var(--text-on-paper-dim); }
 .receipt-qr { text-align: center; margin: 10px 0; }
+
+/* ---------------- Item modifiers (picker + management) ---------------- */
+#item-modifier-picker-modal .modal,
+#item-modifier-manage-modal .modal { width: 420px; }
+#item-modifier-picker-groups,
+#item-modifier-manage-groups {
+  max-height: 50vh;
+  overflow-y: auto;
+  margin-bottom: 14px;
+}
+
+.modifier-group { margin-bottom: 14px; }
+.modifier-group-name { font-weight: 600; margin-bottom: 6px; }
+.modifier-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 0;
+  cursor: pointer;
+}
+.modifier-option input { margin: 0; }
+.modifier-option-price { margin-left: auto; font-family: var(--font-mono); color: var(--text-on-paper-dim); font-size: 12px; }
+
+.modifier-manage-group {
+  padding: 12px;
+  margin-bottom: 12px;
+  background: var(--paper-dim);
+  border-radius: 8px;
+}
+.modifier-manage-group-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+  gap: 8px;
+}
+.modifier-manage-group-name { font-weight: 600; }
+.modifier-manage-group-range { font-weight: 400; font-size: 12px; color: var(--text-on-paper-dim); }
+.modifier-manage-options { display: flex; flex-direction: column; gap: 4px; margin-bottom: 8px; }
+.modifier-manage-option-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+}
+.modifier-manage-option-row span:first-child { flex: 1; }
+.modifier-manage-add-option { display: flex; gap: 8px; }
+.modifier-manage-add-option input { flex: 1; min-width: 0; }
 .receipt-qr img { width: 120px; height: 120px; }
 .receipt-footer { text-align: center; font-style: italic; margin-top: 8px; font-size: 11px; }
+
+#kot-print-btn { margin-top: 12px; }
+
+/* Kept out of the layout/viewport at all times — only ever shown via the
+   @media print rule below, while document.body has .printing-kot (see
+   renderer.js's kot-print-btn handler). */
+#kot-print-body {
+  position: absolute;
+  left: -9999px;
+  top: 0;
+  width: 300px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+.kot-print-title { text-align: center; font-weight: 700; font-size: 15px; }
+.kot-print-meta { text-align: center; font-size: 11px; margin: 2px 0; }
+.kot-print-item { margin: 8px 0; }
+.kot-print-item-row { display: flex; justify-content: space-between; font-weight: 700; font-size: 14px; }
+.kot-print-item-notes { font-size: 11px; font-style: italic; padding-left: 4px; }
 
 @media print {
   body * { visibility: hidden; }
@@ -718,4 +903,90 @@ button, input, select {
     max-height: none;
     overflow: visible;
   }
+
+  /* Printing a KOT (body.printing-kot) shows #kot-print-body instead of
+     #receipt-body — see the doc comment on #kot-print-body above. */
+  body.printing-kot #receipt-body, body.printing-kot #receipt-body * { visibility: hidden !important; }
+  body.printing-kot #kot-print-body, body.printing-kot #kot-print-body * { visibility: visible; }
+  body.printing-kot #kot-print-body {
+    position: absolute;
+    left: 0;
+    top: 0;
+  }
 }
+
+/* ---------------- Staff login / setup ---------------- */
+.auth-screen {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--ink);
+}
+.auth-card {
+  background: var(--paper);
+  color: var(--text-on-paper);
+  border-radius: 10px;
+  padding: 32px;
+  width: 360px;
+  max-width: 90vw;
+}
+.auth-brand { justify-content: center; margin-bottom: 20px; }
+.auth-card h3 {
+  font-family: var(--font-display);
+  margin: 0 0 6px;
+}
+.auth-pin-display {
+  width: 100%;
+  text-align: center;
+  font-size: 22px;
+  letter-spacing: 10px;
+  padding: 10px;
+  border-radius: 6px;
+  border: 1px solid var(--line-on-paper);
+  background: var(--paper-dim);
+  color: var(--text-on-paper);
+  margin: 10px 0;
+  cursor: default;
+}
+.auth-keypad {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+  margin-bottom: 14px;
+}
+.auth-key { font-size: 16px; padding: 14px; }
+.auth-error { color: var(--brick); font-size: 13px; margin: 0 0 10px; }
+
+/* ---------------- Staff management (Settings) ---------------- */
+.staff-role-select {
+  background: var(--ink);
+  border: 1px solid var(--line);
+  color: var(--text-on-ink);
+  padding: 4px 8px;
+  border-radius: 5px;
+  font-size: 13px;
+}
+.staff-manage-row .category-manage-name { min-width: 110px; }
+.staff-inactive-tag { color: var(--text-on-ink-dim); font-size: 11px; font-style: italic; }
+
+/* ---------------- Shift open/close ---------------- */
+.shift-close-modal { width: 420px; }
+/* .receipt-row's own vertical rhythm normally comes from .receipt-body's
+   line-height: 1.7 — this is the first place .receipt-row is used outside
+   that wrapper, so without its own spacing the rows just stack edge to
+   edge. */
+.shift-close-summary { margin-bottom: 18px; }
+.shift-close-summary .receipt-row { padding: 4px 0; }
+.shift-close-summary .receipt-total { margin-top: 6px; }
+.shift-close-diff {
+  font-size: 13px;
+  font-weight: 600;
+  margin: -6px 0 14px;
+}
+.shift-diff-over { color: var(--sage); }
+.shift-diff-short { color: var(--brick); }
+.reports-shift-panel { margin-top: 28px; }
+.table-scroll { overflow-x: auto; }

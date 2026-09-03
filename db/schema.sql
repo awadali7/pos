@@ -1,6 +1,60 @@
 -- Restaurant POS — core schema (SQLite)
 -- Applied automatically on every app start (see db/db.js) — nothing to run by hand.
 
+-- Staff accounts. pin_hash/pin_salt are scryptSync output (see main.js
+-- hashPin/verifyPin) — never the raw PIN. role gates which IPC handlers in
+-- main.js a logged-in session may call (see requireRole): 'owner' can do
+-- anything; 'manager' additionally can edit the menu and view reports but
+-- not touch Settings or staff accounts; 'staff' is order-taking only.
+-- is_active lets an owner disable a former staff member's login without
+-- deleting them, since orders.created_by_staff_id/closed_by_staff_id
+-- reference this table and must survive their departure.
+CREATE TABLE IF NOT EXISTS staff (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    name       TEXT NOT NULL,
+    pin_hash   TEXT NOT NULL,
+    pin_salt   TEXT NOT NULL,
+    role       TEXT NOT NULL CHECK (role IN ('owner', 'manager', 'staff')),
+    is_active  INTEGER NOT NULL DEFAULT 1 CHECK (is_active IN (0, 1)),
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Cash-drawer shifts for the terminal — at most one with closed_at IS NULL
+-- at a time (enforced in main.js's shifts:open, not a DB constraint: SQLite
+-- can't express "at most one NULL" as a plain UNIQUE index, and this is a
+-- single-process app so there's no real race to guard against). Sales
+-- figures (cash/card/upi_sales, order_count, expected_cash) are computed
+-- from order_payments over [opened_at, closed_at] and snapshotted here at
+-- close time rather than recomputed live on every later view — same
+-- snapshot reasoning as order_items.item_name, so a shift's historical
+-- reconciliation record can't drift if the computation logic changes later.
+CREATE TABLE IF NOT EXISTS shifts (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    opened_at           TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    opened_by_staff_id  INTEGER REFERENCES staff(id) ON DELETE SET NULL,
+    opened_by_name      TEXT NOT NULL,
+    opening_float       NUMERIC(10, 2) NOT NULL DEFAULT 0 CHECK (opening_float >= 0),
+    -- The last order_payments.id that existed at the moment this shift
+    -- opened; sales counted for this shift are id > this. An id boundary
+    -- rather than an opened_at/closed_at time range because created_at only
+    -- has second-level resolution (SQLite's CURRENT_TIMESTAMP) — a payment
+    -- landing in the same second a shift opens or closes would otherwise be
+    -- ambiguously double-counted or dropped. id is monotonic and unique.
+    opening_payment_id  INTEGER NOT NULL DEFAULT 0,
+    closed_at           TEXT,
+    closed_by_staff_id  INTEGER REFERENCES staff(id) ON DELETE SET NULL,
+    closed_by_name      TEXT,
+    cash_sales          NUMERIC(10, 2),
+    card_sales          NUMERIC(10, 2),
+    upi_sales           NUMERIC(10, 2),
+    order_count         INTEGER,
+    expected_cash       NUMERIC(10, 2),
+    counted_cash        NUMERIC(10, 2),
+    notes               TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_shifts_closed_at ON shifts(closed_at);
+
 CREATE TABLE IF NOT EXISTS categories (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     name        TEXT NOT NULL UNIQUE,
@@ -27,6 +81,45 @@ CREATE TABLE IF NOT EXISTS menu_items (
     created_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
+-- A menu item's configurable options (e.g. "Size": Small/Medium/Large,
+-- "Add-ons": Extra cheese/Extra sauce). min_select/max_select bound how many
+-- options from this group an order must carry: 1/1 = required single choice,
+-- 0/1 = optional single choice, 0/N = optional multi-select. Enforced in
+-- orders:addItem (main.js), not by a DB constraint (SQLite can't count sibling
+-- rows in a CHECK).
+CREATE TABLE IF NOT EXISTS modifier_groups (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    menu_item_id  INTEGER NOT NULL REFERENCES menu_items(id) ON DELETE CASCADE,
+    name          TEXT NOT NULL,
+    min_select    INTEGER NOT NULL DEFAULT 0 CHECK (min_select >= 0),
+    max_select    INTEGER NOT NULL DEFAULT 1 CHECK (max_select >= 1),
+    sort_order    INTEGER NOT NULL DEFAULT 0,
+    CHECK (min_select <= max_select)
+);
+
+CREATE TABLE IF NOT EXISTS modifier_options (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    group_id    INTEGER NOT NULL REFERENCES modifier_groups(id) ON DELETE CASCADE,
+    name        TEXT NOT NULL,
+    price_delta NUMERIC(10, 2) NOT NULL DEFAULT 0,
+    sort_order  INTEGER NOT NULL DEFAULT 0
+);
+
+-- One row per modifier selected on an order line, named/priced at add-time —
+-- same snapshot reasoning as order_items.item_name (menu/modifier edits
+-- later must not change history). Deliberately NOT folded into order_items'
+-- own price math: orders:addItem already adds each selected option's
+-- price_delta into order_items.unit_price at insert time, so every
+-- total/tax/report calculation elsewhere in this codebase (recalcOrder,
+-- lineTax, reports:summary) needs zero changes — this table exists purely
+-- for display (ticket/receipt/KOT show which options were picked).
+CREATE TABLE IF NOT EXISTS order_item_modifiers (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    order_item_id  INTEGER NOT NULL REFERENCES order_items(id) ON DELETE CASCADE,
+    name           TEXT NOT NULL,
+    price_delta    NUMERIC(10, 2) NOT NULL DEFAULT 0
+);
+
 CREATE TABLE IF NOT EXISTS restaurant_tables (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     name        TEXT NOT NULL UNIQUE,
@@ -49,7 +142,19 @@ CREATE TABLE IF NOT EXISTS orders (
     payment_mode   TEXT CHECK (payment_mode IN ('cash', 'card', 'upi', NULL)),
     invoice_number TEXT,
     created_at     TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    paid_at        TEXT
+    paid_at        TEXT,
+    -- Who rang this order up / who closed it out (paid or cancelled) —
+    -- *_name is a snapshot (same reasoning as order_items.item_name) so
+    -- attribution survives a staff account being deleted later.
+    created_by_staff_id INTEGER REFERENCES staff(id) ON DELETE SET NULL,
+    created_by_name     TEXT,
+    closed_by_staff_id  INTEGER REFERENCES staff(id) ON DELETE SET NULL,
+    closed_by_name      TEXT,
+    -- Optional, captured at checkout (see billing:finalize) — customers:lookup
+    -- matches on customer_phone across past orders to recognize a repeat
+    -- customer and suggest their name.
+    customer_phone TEXT,
+    customer_name  TEXT
 );
 
 CREATE TABLE IF NOT EXISTS order_items (
@@ -62,7 +167,23 @@ CREATE TABLE IF NOT EXISTS order_items (
     notes         TEXT,
     hsn_code      TEXT,               -- snapshot from the menu item, same reasoning as item_name
     gst_rate      NUMERIC(5, 2) NOT NULL DEFAULT 0,
-    tax_amount    NUMERIC(10, 2) NOT NULL DEFAULT 0
+    tax_amount    NUMERIC(10, 2) NOT NULL DEFAULT 0,
+    kot_fired_at  TEXT                -- set once this line has been sent to the kitchen; NULL = not yet fired
+);
+
+-- One row per tender on a paid order. A single-mode payment (the common
+-- case) gets exactly one row here matching orders.payment_mode/total; a
+-- split payment (e.g. part cash + part card) gets one row per tender and
+-- orders.payment_mode is left NULL (already a valid value per its CHECK
+-- constraint) since there's no single mode to summarize it as. This table is
+-- the source of truth for the breakdown either way — orders.payment_mode is
+-- kept only as a cheap single-value display shorthand for the common case.
+CREATE TABLE IF NOT EXISTS order_payments (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    order_id   INTEGER NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+    mode       TEXT NOT NULL CHECK (mode IN ('cash', 'card', 'upi')),
+    amount     NUMERIC(10, 2) NOT NULL CHECK (amount > 0),
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE TABLE IF NOT EXISTS settings (
@@ -70,7 +191,11 @@ CREATE TABLE IF NOT EXISTS settings (
     value TEXT NOT NULL
 );
 
+CREATE INDEX IF NOT EXISTS idx_order_payments_order_id ON order_payments(order_id);
 CREATE INDEX IF NOT EXISTS idx_order_items_order_id ON order_items(order_id);
+CREATE INDEX IF NOT EXISTS idx_modifier_groups_menu_item ON modifier_groups(menu_item_id);
+CREATE INDEX IF NOT EXISTS idx_modifier_options_group ON modifier_options(group_id);
+CREATE INDEX IF NOT EXISTS idx_order_item_modifiers_order_item ON order_item_modifiers(order_item_id);
 CREATE INDEX IF NOT EXISTS idx_menu_items_category ON menu_items(category_id);
 CREATE INDEX IF NOT EXISTS idx_menu_items_subcategory ON menu_items(subcategory_id);
 CREATE INDEX IF NOT EXISTS idx_subcategories_category ON subcategories(category_id);
