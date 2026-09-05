@@ -25,10 +25,11 @@ documentation — see [README.md](README.md) for what the app does.
 | `reports` | `summary`, `exportExcel` |
 | `settings` | `get`, `update` |
 | `mobile` | `getServerInfo` |
+| `backup` | `create`, `list` |
 
 `billing:finalize` takes either `paymentMode` (single tender, unchanged since v1) or `payments: [{mode, amount}]` (split payment — must sum to the order total within 1 paisa). `orders:addItem` takes an optional `modifierOptionIds: [id, ...]` — server re-fetches each option's name/price and validates it against the menu item's modifier groups' min/max-select bounds. `billing:finalize` also takes optional `customerPhone`/`customerName` (captured at checkout, see `orders.customer_phone`/`customer_name` below); `customers:lookup(phone)` returns `{name, visitCount}` (visitCount excludes cancelled orders) or `null` if that phone has no history — used to recognize a repeat customer at checkout.
 
-**Access control**: `main.js` holds an in-memory `currentStaff` session (`{id, name, role}`, set by `staff:login`/`staff:createFirstOwner`, cleared by `staff:logout`) and every privileged handler calls `requireRole(...roles)` or `requireLogin()` before doing anything — this is the *real* enforcement, not just UI. Role gates: `owner` only — `settings:update`, all `staff:*` management (add/update/delete/list); `owner`+`manager` — menu/category/subcategory/modifier writes, `reports:*`, `shifts:history`; any logged-in role — `orders:create`, `billing:finalize`, `orders:cancel`, `shifts:open`, `shifts:close` (order handlers also stamp `orders.created_by_*`/`closed_by_*`). Reads (list/get endpoints) are ungated. The renderer's own role check (`applyRolePermissions()` in `renderer.js`) only hides tabs — it is not a security boundary by itself. `requireRole`/`requireLogin` are thin wrappers around session-parameterized `requireRoleFor`/`requireLoginFor` that read the global `currentStaff` — the mobile ordering server (below) calls the `*For` versions directly with its own per-device session instead, so a phone logging in can never stomp the desktop's session or vice versa.
+**Access control**: `main.js` holds an in-memory `currentStaff` session (`{id, name, role}`, set by `staff:login`/`staff:createFirstOwner`, cleared by `staff:logout`) and every privileged handler calls `requireRole(...roles)` or `requireLogin()` before doing anything — this is the *real* enforcement, not just UI. Role gates: `owner` only — `settings:update`, all `staff:*` management (add/update/delete/list), `backup:*`; `owner`+`manager` — menu/category/subcategory/modifier writes, `reports:*`, `shifts:history`; any logged-in role — `orders:create`, `billing:finalize`, `orders:cancel`, `shifts:open`, `shifts:close` (order handlers also stamp `orders.created_by_*`/`closed_by_*`). Reads (list/get endpoints) are ungated. The renderer's own role check (`applyRolePermissions()` in `renderer.js`) only hides tabs — it is not a security boundary by itself. `requireRole`/`requireLogin` are thin wrappers around session-parameterized `requireRoleFor`/`requireLoginFor` that read the global `currentStaff` — the mobile ordering server (below) calls the `*For` versions directly with its own per-device session instead, so a phone logging in can never stomp the desktop's session or vice versa.
 
 **Shifts**: one open shift (`shifts` row with `closed_at IS NULL`) at a time for the whole terminal — not per staff member, since the cash drawer is one physical thing. "Sales during a shift" is computed from `order_payments` bounded by `shifts.opening_payment_id` (an id, not a timestamp range — `computeShiftSales()` in `main.js`; see the comment on that column for why a time range doesn't work: `created_at` only has second-level resolution). Figures (`cash_sales`/`card_sales`/`upi_sales`/`order_count`/`expected_cash`) are snapshotted onto the row at `shifts:close`, not recomputed live afterward.
 
@@ -136,6 +137,25 @@ rejects with 409 when the *effective* KOT printer mode
 qrDataUrl}` for the Settings screen's "Mobile ordering" section — `lanIp`
 via `os.networkInterfaces()` (first non-internal IPv4), `qrDataUrl` via the
 same `qrcode` package already used for the UPI receipt QR.
+
+## Backups (`main.js`, "Database backups" section near the top)
+
+`backupDatabase()` uses `better-sqlite3`'s own `db.backup(destPath)` (SQLite's
+online-backup API) rather than copying the `.db` file directly — the live DB
+runs in WAL mode (`db.pragma('journal_mode = WAL')` in `db/db.js`), so a raw
+file copy can miss recent commits still sitting in the `-wal` file. Backups
+land in a `backups/` folder next to the live database (`path.dirname(db.name)`
+— `db.name` is the exact path `db.js` opened, so this doesn't re-derive
+`dataDir`), named `restaurant_pos-<ISO timestamp>.db`; `pruneOldBackups()`
+keeps only the newest `BACKUP_RETENTION_COUNT` (30) afterward, one shared pool
+across every trigger. Triggered automatically at app startup and at the end of
+`shifts:close`, plus on demand via `backup:create` (Settings screen's "Back up
+now" button) — all three are fire-and-forget (`.catch(console.error)` on the
+two automatic ones) so a backup failure never blocks the app opening or a
+shift closing. `backup:list` feeds the "Last backup: ..." line in Settings.
+Restoring is manual/undocumented-in-app by design: stop the app, copy a
+backup file over `restaurant_pos.db`, restart — an automated restore risks
+picking the wrong file while the app is still writing.
 
 ## Design tokens (`src/style.css` `:root`)
 

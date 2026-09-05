@@ -89,4 +89,8 @@ contextBridge.exposeInMainWorld('pos', {
   mobile: {
     getServerInfo: () => ipcRenderer.invoke('mobile:getServerInfo'),
   },
+  backup: {
+    create: () => ipcRenderer.invoke('backup:create'),
+    list: () => ipcRenderer.invoke('backup:list'),
+  },
 });

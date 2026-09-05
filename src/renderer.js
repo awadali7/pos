@@ -1853,6 +1853,7 @@ async function loadSettings() {
   updatePrinterModeVisibility();
   updateKotPrinterModeVisibility();
   await loadMobileServerInfo();
+  await loadBackupInfo();
   await renderStaffManageList();
 }
 
@@ -1865,6 +1866,31 @@ async function loadMobileServerInfo() {
   document.getElementById('settings-mobile-url').textContent = info.url || '';
   document.getElementById('settings-mobile-qr').src = info.qrDataUrl || '';
 }
+
+// Shows when the most recent backup (automatic or manual — see backup:list
+// in main.js, same pool for both) was taken, so "Back up now" isn't the
+// only way to tell whether backups are actually happening.
+async function loadBackupInfo() {
+  const backups = await window.pos.backup.list();
+  const el = document.getElementById('settings-backup-last');
+  el.textContent = backups.length
+    ? `Last backup: ${new Date(backups[0].createdAt).toLocaleString()} (${backups.length} kept)`
+    : 'No backups yet.';
+}
+
+document.getElementById('settings-backup-now-btn').addEventListener('click', async () => {
+  const btn = document.getElementById('settings-backup-now-btn');
+  btn.disabled = true;
+  try {
+    await window.pos.backup.create();
+    await loadBackupInfo();
+    alert('Backup created.');
+  } catch (err) {
+    alert(`Backup failed: ${err.message}`);
+  } finally {
+    btn.disabled = false;
+  }
+});
 
 // Populates a system-printer <select> from printers:listSystem — shared by
 // the receipt and KOT printer sections, since both list the same OS

@@ -98,6 +98,9 @@ function createWindow() {
 app.whenReady().then(() => {
   createWindow();
   syncMobileServer();
+  // Fire-and-forget — cheap insurance against forgetting to back up, but a
+  // failure here (e.g. disk full) must never block the app from opening.
+  backupDatabase().catch((err) => console.error('Startup backup failed:', err));
 });
 
 app.on('window-all-closed', () => {
@@ -147,6 +150,46 @@ function adjustStock(menuItemId, delta) {
   const next = Math.max(0, item.stock_quantity + delta);
   db.prepare('UPDATE menu_items SET stock_quantity = ?, is_available = ? WHERE id = ?')
     .run(next, next > 0 ? 1 : 0, menuItemId);
+}
+
+// ---------------- Database backups ----------------
+// db.js runs the live database in WAL mode, so a plain file copy of just
+// restaurant_pos.db can miss recent commits still sitting in its -wal file.
+// db.backup() uses SQLite's own online-backup API instead, which snapshots
+// everything consistently into a new file while the app keeps running and
+// writing. Backups live in a `backups` folder next to the live database —
+// db.name is the exact path db.js opened it with, so this doesn't need its
+// own copy of dataDir-resolution logic.
+const BACKUP_RETENTION_COUNT = 30;
+
+function backupsDir() {
+  return path.join(path.dirname(db.name), 'backups');
+}
+
+// Newest-first, oldest beyond BACKUP_RETENTION_COUNT deleted — otherwise a
+// restaurant open every day would accumulate backups forever. Automatic
+// (startup, shift close) and manual backups share the same pool/limit.
+function pruneOldBackups(dir) {
+  const files = fs.readdirSync(dir)
+    .filter((f) => f.startsWith('restaurant_pos-') && f.endsWith('.db'))
+    .map((f) => ({ name: f, path: path.join(dir, f), mtimeMs: fs.statSync(path.join(dir, f)).mtimeMs }))
+    .sort((a, b) => b.mtimeMs - a.mtimeMs);
+  files.slice(BACKUP_RETENTION_COUNT).forEach((f) => fs.unlinkSync(f.path));
+}
+
+// Returns a promise resolving to the new backup's path. Callers that don't
+// need the result (the startup/shift-close triggers below) just attach a
+// .catch() instead of awaiting, so a backup failure never blocks the app
+// from opening or a shift from closing.
+function backupDatabase() {
+  const dir = backupsDir();
+  fs.mkdirSync(dir, { recursive: true });
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-').replace('Z', '');
+  const destPath = path.join(dir, `restaurant_pos-${stamp}.db`);
+  return db.backup(destPath).then(() => {
+    pruneOldBackups(dir);
+    return destPath;
+  });
 }
 
 function assertValidGstRate(rate) {
@@ -788,7 +831,7 @@ ipcMain.handle('shifts:close', (_e, { countedCash, notes }) => {
   const sales = computeShiftSales(shift.opening_payment_id);
   const expectedCash = +(Number(shift.opening_float) + sales.cashSales).toFixed(2);
 
-  return db.prepare(`
+  const closedShift = db.prepare(`
     UPDATE shifts SET
       closed_at = CURRENT_TIMESTAMP, closed_by_staff_id = ?, closed_by_name = ?,
       cash_sales = ?, card_sales = ?, upi_sales = ?, order_count = ?,
@@ -800,11 +843,34 @@ ipcMain.handle('shifts:close', (_e, { countedCash, notes }) => {
     expectedCash, counted, String(notes || '').trim() || null,
     shift.id
   );
+  // Fire-and-forget, same reasoning as the startup backup — a shift close
+  // must still succeed and return even if the backup itself fails.
+  backupDatabase().catch((err) => console.error('Shift-close backup failed:', err));
+  return closedShift;
 });
 
 ipcMain.handle('shifts:history', () => {
   requireRole('owner', 'manager');
   return db.prepare('SELECT * FROM shifts WHERE closed_at IS NOT NULL ORDER BY closed_at DESC LIMIT 100').all();
+});
+
+// ---------- Backups ----------
+ipcMain.handle('backup:create', () => {
+  requireRole('owner');
+  return backupDatabase();
+});
+
+ipcMain.handle('backup:list', () => {
+  requireRole('owner');
+  const dir = backupsDir();
+  if (!fs.existsSync(dir)) return [];
+  return fs.readdirSync(dir)
+    .filter((f) => f.startsWith('restaurant_pos-') && f.endsWith('.db'))
+    .map((f) => {
+      const stat = fs.statSync(path.join(dir, f));
+      return { name: f, createdAt: stat.mtime.toISOString(), sizeBytes: stat.size };
+    })
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
 });
 
 // ---------- Menu: Categories ----------
