@@ -24,10 +24,11 @@ documentation — see [README.md](README.md) for what the app does.
 | `receipt` | `print`, `testPrint`, `printKot`, `confirmKotPrinted` |
 | `reports` | `summary`, `exportExcel` |
 | `settings` | `get`, `update` |
+| `mobile` | `getServerInfo` |
 
 `billing:finalize` takes either `paymentMode` (single tender, unchanged since v1) or `payments: [{mode, amount}]` (split payment — must sum to the order total within 1 paisa). `orders:addItem` takes an optional `modifierOptionIds: [id, ...]` — server re-fetches each option's name/price and validates it against the menu item's modifier groups' min/max-select bounds. `billing:finalize` also takes optional `customerPhone`/`customerName` (captured at checkout, see `orders.customer_phone`/`customer_name` below); `customers:lookup(phone)` returns `{name, visitCount}` (visitCount excludes cancelled orders) or `null` if that phone has no history — used to recognize a repeat customer at checkout.
 
-**Access control**: `main.js` holds an in-memory `currentStaff` session (`{id, name, role}`, set by `staff:login`/`staff:createFirstOwner`, cleared by `staff:logout`) and every privileged handler calls `requireRole(...roles)` or `requireLogin()` before doing anything — this is the *real* enforcement, not just UI. Role gates: `owner` only — `settings:update`, all `staff:*` management (add/update/delete/list); `owner`+`manager` — menu/category/subcategory/modifier writes, `reports:*`, `shifts:history`; any logged-in role — `orders:create`, `billing:finalize`, `orders:cancel`, `shifts:open`, `shifts:close` (order handlers also stamp `orders.created_by_*`/`closed_by_*`). Reads (list/get endpoints) are ungated. The renderer's own role check (`applyRolePermissions()` in `renderer.js`) only hides tabs — it is not a security boundary by itself.
+**Access control**: `main.js` holds an in-memory `currentStaff` session (`{id, name, role}`, set by `staff:login`/`staff:createFirstOwner`, cleared by `staff:logout`) and every privileged handler calls `requireRole(...roles)` or `requireLogin()` before doing anything — this is the *real* enforcement, not just UI. Role gates: `owner` only — `settings:update`, all `staff:*` management (add/update/delete/list); `owner`+`manager` — menu/category/subcategory/modifier writes, `reports:*`, `shifts:history`; any logged-in role — `orders:create`, `billing:finalize`, `orders:cancel`, `shifts:open`, `shifts:close` (order handlers also stamp `orders.created_by_*`/`closed_by_*`). Reads (list/get endpoints) are ungated. The renderer's own role check (`applyRolePermissions()` in `renderer.js`) only hides tabs — it is not a security boundary by itself. `requireRole`/`requireLogin` are thin wrappers around session-parameterized `requireRoleFor`/`requireLoginFor` that read the global `currentStaff` — the mobile ordering server (below) calls the `*For` versions directly with its own per-device session instead, so a phone logging in can never stomp the desktop's session or vice versa.
 
 **Shifts**: one open shift (`shifts` row with `closed_at IS NULL`) at a time for the whole terminal — not per staff member, since the cash drawer is one physical thing. "Sales during a shift" is computed from `order_payments` bounded by `shifts.opening_payment_id` (an id, not a timestamp range — `computeShiftSales()` in `main.js`; see the comment on that column for why a time range doesn't work: `created_at` only has second-level resolution). Figures (`cash_sales`/`card_sales`/`upi_sales`/`order_count`/`expected_cash`) are snapshotted onto the row at `shifts:close`, not recomputed live afterward.
 
@@ -53,7 +54,7 @@ no other path from renderer to main process.
 
 `orders.status` is one of `open | paid | cancelled` (schema CHECK). All
 money mutation (add/remove item, qty change, discount edit) funnels
-through `recalcOrder()` in `main.js` (~line 47), which also clamps
+through `recalcOrder()` in `main.js` (~line 121), which also clamps
 discount to `[0, subtotal + tax]`.
 
 ## Views (`src/renderer.js` `VIEWS` array / `src/index.html` `#view-*`)
@@ -66,13 +67,20 @@ element is `#view-<name>` toggled with the `.hidden` class.
 window until `staff:login`/`staff:createFirstOwner` succeeds — see
 `initAuth()`/`onLoggedIn()` in `renderer.js`.
 
-## Settings keys (`settings:get` / `settings:update`, see `SETTINGS_FIELDS` map in `main.js` ~line 831)
+Take Order's context row has two mutually-exclusive table fields, toggled by
+`updateTableFieldVisibility()` on `order-type` change: `#table-select`
+(dine-in — a real `restaurant_tables` id, wired the same way as tapping a
+tile on the Tables tab, so occupancy tracking works) and `#table-label`
+(takeaway/delivery — free text, no table link). `resetTableFields()` clears
+both wherever an order concludes.
+
+## Settings keys (`settings:get` / `settings:update`, see `SETTINGS_FIELDS` map in `main.js` ~line 1522)
 
 `defaultTaxPercent`, `businessName`, `businessAddress`, `businessPhone`,
 `gstin`, `fssaiNo`, `invoicePrefix`, `upiId`, `footerNote`,
 `zomatoRestaurantId`, `printerMode` (`dialog | system | network`),
 `printerSystemName`, `printerNetworkHost`, `printerNetworkPort`,
-`printerPaperWidth`.
+`printerPaperWidth`, `mobileServerEnabled`, `mobileServerPort`.
 
 ## Printer (`printer/escpos.js` + `main.js` `printBufferToNetworkPrinter`)
 
@@ -81,6 +89,36 @@ Three `printerMode`s: `dialog` (OS print dialog via Electron), `system`
 bytes over TCP to `printerNetworkHost:printerNetworkPort`).
 `escpos.js` has no Electron/DB dependency — see the `test-backend-logic`
 skill for testing it standalone.
+
+## Mobile ordering server (`main.js`, "Mobile ordering server" section near the end)
+
+A plain `http` server, in the same process, gated by `mobileServerEnabled`
+(default off) and bound to `0.0.0.0:mobileServerPort` so phones/tablets on
+the same LAN can reach it — started/restarted by `syncMobileServer()` (at
+app boot and at the end of every `settings:update`), stopped by
+`stopMobileServer()` on `window-all-closed`. Serves the static client in
+`src/mobile/` (`index.html`/`mobile.css`/`app.js`, no build step) plus a
+JSON API under `/api/mobile/*` (`MOBILE_ROUTES` in `main.js`), authenticated
+per-device via `Authorization: Bearer <token>` looked up in the `sessions`
+map (see Access control above) — `POST /api/mobile/login` (PIN, via
+`findStaffByPin`) is the only unauthenticated route.
+
+Scope is deliberately narrow: dine-in orders tied to a table, plus firing
+KOT — no billing/payment, discounts, takeaway/delivery, or settings/reports/
+staff admin (those routes simply don't exist here). Routes call the same
+extracted core functions the desktop IPC handlers use (`createOrder`,
+`addOrderItem`, `updateOrderItemQty`, `removeOrderItem`, `fireKot`,
+`listOpenTables`, `listOpenOrders`, `getOrderDetail`, `listMenu`,
+`listModifierGroups`), so money/tax/modifier/table-locking logic is
+identical, not reimplemented. `POST /api/mobile/orders/:id/fire-kot`
+rejects with 409 when `printerMode` is `dialog`, since that mode only
+works via the desktop renderer's own `window.print()` — there is no
+equivalent on a phone.
+
+`mobile:getServerInfo` (IPC) returns `{enabled, port, lanIp, url,
+qrDataUrl}` for the Settings screen's "Mobile ordering" section — `lanIp`
+via `os.networkInterfaces()` (first non-internal IPv4), `qrDataUrl` via the
+same `qrcode` package already used for the UPI receipt QR.
 
 ## Design tokens (`src/style.css` `:root`)
 

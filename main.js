@@ -1,6 +1,9 @@
 const { app, BrowserWindow, ipcMain, dialog } = require('electron');
 const path = require('path');
+const fs = require('fs');
 const net = require('net');
+const http = require('http');
+const os = require('os');
 const crypto = require('crypto');
 const ExcelJS = require('exceljs');
 const QRCode = require('qrcode');
@@ -18,14 +21,34 @@ let mainWindow;
 // directly would otherwise bypass any renderer-side-only check entirely.
 let currentStaff = null; // { id, name, role } while logged in, else null
 
-function requireRole(...roles) {
-  if (!currentStaff || !roles.includes(currentStaff.role)) {
+// Mobile ordering clients (phones/tablets over LAN, see the "Mobile
+// ordering server" section near the end of this file) each get their own
+// session here instead of sharing currentStaff — otherwise one phone
+// logging in would silently log out the desktop (and vice versa), since
+// there'd be only one global session for the whole process. Token -> {id,
+// name, role}, in-memory only, cleared on app restart — same lifetime
+// model currentStaff itself already has.
+const sessions = new Map();
+
+function requireLoginFor(session) {
+  if (!session) throw new Error('Not logged in');
+}
+
+function requireRoleFor(session, ...roles) {
+  if (!session || !roles.includes(session.role)) {
     throw new Error('Not authorized for this action');
   }
 }
 
+// Desktop IPC handlers keep calling these zero-arg forms unchanged — they
+// just delegate to currentStaff, so every existing requireRole(...)/
+// requireLogin() call site behaves exactly as before.
+function requireRole(...roles) {
+  requireRoleFor(currentStaff, ...roles);
+}
+
 function requireLogin() {
-  if (!currentStaff) throw new Error('Not logged in');
+  requireLoginFor(currentStaff);
 }
 
 // scrypt, not bcrypt — Node's built-in crypto covers this without adding a
@@ -41,6 +64,14 @@ function verifyPin(pin, salt, expectedHash) {
   const actual = Buffer.from(hashPin(pin, salt), 'hex');
   const expected = Buffer.from(expectedHash, 'hex');
   return actual.length === expected.length && crypto.timingSafeEqual(actual, expected);
+}
+
+// Shared by staff:login and the mobile server's own login route — a PIN
+// isn't scoped to a particular name, so this scans every active staff
+// member's hash, same as staff:login always has.
+function findStaffByPin(pin) {
+  const candidates = db.prepare('SELECT * FROM staff WHERE is_active = 1').all();
+  return candidates.find((s) => verifyPin(pin, s.pin_salt, s.pin_hash)) || null;
 }
 
 function toStaffView(row) {
@@ -64,9 +95,13 @@ function createWindow() {
   mainWindow.loadFile(path.join(__dirname, 'src', 'index.html'));
 }
 
-app.whenReady().then(createWindow);
+app.whenReady().then(() => {
+  createWindow();
+  syncMobileServer();
+});
 
 app.on('window-all-closed', () => {
+  stopMobileServer();
   if (process.platform !== 'darwin') app.quit();
 });
 app.on('activate', () => {
@@ -548,8 +583,7 @@ ipcMain.handle('staff:createFirstOwner', (_e, { name, pin }) => {
 // PIN, not scoped to a particular name, since a shared PIN pad doesn't know
 // who's about to type until the PIN identifies them.
 ipcMain.handle('staff:login', (_e, { pin }) => {
-  const candidates = db.prepare('SELECT * FROM staff WHERE is_active = 1').all();
-  const match = candidates.find((s) => verifyPin(pin, s.pin_salt, s.pin_hash));
+  const match = findStaffByPin(pin);
   if (!match) throw new Error('Incorrect PIN');
   currentStaff = { id: match.id, name: match.name, role: match.role };
   return currentStaff;
@@ -775,7 +809,7 @@ ipcMain.handle('subcategories:delete', (_e, id) => {
 });
 
 // ---------- Menu: Items ----------
-ipcMain.handle('menu:list', () => {
+function listMenu() {
   return db.prepare(`
     SELECT m.*, c.name AS category_name, sc.name AS subcategory_name,
            (SELECT COUNT(*) FROM modifier_groups mg WHERE mg.menu_item_id = m.id) AS modifier_group_count
@@ -784,7 +818,9 @@ ipcMain.handle('menu:list', () => {
     LEFT JOIN subcategories sc ON sc.id = m.subcategory_id
     ORDER BY c.sort_order NULLS LAST, m.name
   `).all();
-});
+}
+
+ipcMain.handle('menu:list', () => listMenu());
 
 ipcMain.handle('menu:add', (_e, item) => {
   requireRole('owner', 'manager');
@@ -840,7 +876,7 @@ ipcMain.handle('menu:bulkSetGstRate', (_e, { gstRate, categoryId }) => {
 });
 
 // ---------- Menu: Item modifiers ----------
-ipcMain.handle('modifiers:listGroups', (_e, menuItemId) => {
+function listModifierGroups(menuItemId) {
   const groups = db.prepare('SELECT * FROM modifier_groups WHERE menu_item_id = ? ORDER BY sort_order, id').all(menuItemId);
   // Called on every tap of a modifier-bearing item in Take Order plus every
   // render of the Menu's modifier-management modal — most items have no
@@ -853,7 +889,9 @@ ipcMain.handle('modifiers:listGroups', (_e, menuItemId) => {
     `SELECT * FROM modifier_options WHERE group_id IN (${groupIds.map(() => '?').join(',')}) ORDER BY sort_order, id`
   ).all(...groupIds);
   return groups.map((g) => ({ ...g, options: options.filter((o) => o.group_id === g.id) }));
-});
+}
+
+ipcMain.handle('modifiers:listGroups', (_e, menuItemId) => listModifierGroups(menuItemId));
 
 ipcMain.handle('modifiers:addGroup', (_e, { menuItemId, name, minSelect, maxSelect }) => {
   requireRole('owner', 'manager');
@@ -887,19 +925,34 @@ ipcMain.handle('modifiers:addOption', (_e, { groupId, name, priceDelta }) => {
 
 ipcMain.handle('modifiers:deleteOption', (_e, optionId) => {
   requireRole('owner', 'manager');
+  const option = db.prepare('SELECT group_id FROM modifier_options WHERE id = ?').get(optionId);
+  if (!option) return { success: true };
+  const group = db.prepare('SELECT name, min_select FROM modifier_groups WHERE id = ?').get(option.group_id);
+  // A required group (min_select > 0) left with fewer options than it
+  // requires becomes permanently un-orderable — orders:addItem's own
+  // min/max check would reject every attempt to add the item, with no
+  // warning anywhere that this state exists until a cashier hits it live.
+  if (group && group.min_select > 0) {
+    const { count } = db.prepare('SELECT COUNT(*) AS count FROM modifier_options WHERE group_id = ?').get(option.group_id);
+    if (count - 1 < group.min_select) {
+      throw new Error(`Can't remove this option — "${group.name}" requires at least ${group.min_select}, and this is one of only ${count}. Add a replacement first, or delete the whole group instead.`);
+    }
+  }
   db.prepare('DELETE FROM modifier_options WHERE id = ?').run(optionId);
   return { success: true };
 });
 
 // ---------- Tables ----------
-ipcMain.handle('tables:list', () => {
+function listOpenTables() {
   return db.prepare(`
     SELECT t.*, o.id AS order_id, o.total AS order_total, o.created_at AS order_created_at
     FROM restaurant_tables t
     LEFT JOIN orders o ON o.table_id = t.id AND o.status = 'open'
     ORDER BY t.sort_order, t.name
   `).all();
-});
+}
+
+ipcMain.handle('tables:list', () => listOpenTables());
 
 ipcMain.handle('tables:add', (_e, { name, seats }) => {
   requireLogin();
@@ -921,16 +974,18 @@ ipcMain.handle('tables:delete', (_e, id) => {
 });
 
 // ---------- Orders ----------
-ipcMain.handle('orders:listOpen', () => {
+function listOpenOrders() {
   return db.prepare(`SELECT * FROM orders WHERE status = 'open' ORDER BY created_at DESC`).all();
-});
+}
+
+ipcMain.handle('orders:listOpen', () => listOpenOrders());
 
 ipcMain.handle('orders:listAll', () => {
   return db.prepare('SELECT * FROM orders ORDER BY created_at DESC').all();
 });
 
-ipcMain.handle('orders:create', (_e, { orderType, tableLabel, source, tableId }) => {
-  requireLogin();
+function createOrder(session, { orderType, tableLabel, source, tableId }) {
+  requireLoginFor(session);
   let label = tableLabel || null;
   let linkedTableId = tableId || null;
   if (linkedTableId) {
@@ -943,8 +998,10 @@ ipcMain.handle('orders:create', (_e, { orderType, tableLabel, source, tableId })
   return db.prepare(
     `INSERT INTO orders (order_type, table_label, table_id, source, created_by_staff_id, created_by_name)
      VALUES (?, ?, ?, ?, ?, ?) RETURNING *`
-  ).get(orderType || 'dine-in', label, linkedTableId, source || 'in-house', currentStaff.id, currentStaff.name);
-});
+  ).get(orderType || 'dine-in', label, linkedTableId, source || 'in-house', session.id, session.name);
+}
+
+ipcMain.handle('orders:create', (_e, payload) => createOrder(currentStaff, payload));
 
 // Attaches each order_item's chosen modifiers (order_item_modifiers) as a
 // nested `.modifiers` array — shared by orders:get and anywhere else that
@@ -958,15 +1015,17 @@ function attachModifiers(items) {
   return items.map((i) => ({ ...i, modifiers: modifiers.filter((m) => m.order_item_id === i.id) }));
 }
 
-ipcMain.handle('orders:get', (_e, orderId) => {
+function getOrderDetail(orderId) {
   const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(orderId);
   if (!order) return null;
   const items = db.prepare('SELECT * FROM order_items WHERE order_id = ? ORDER BY id').all(orderId);
   return { ...order, items: attachModifiers(items) };
-});
+}
 
-ipcMain.handle('orders:addItem', (_e, { orderId, menuItemId, name, price, quantity, notes, modifierOptionIds }) => {
-  requireLogin();
+ipcMain.handle('orders:get', (_e, orderId) => getOrderDetail(orderId));
+
+function addOrderItem(session, { orderId, menuItemId, name, price, quantity, notes, modifierOptionIds }) {
+  requireLoginFor(session);
   // Price/name/HSN/GST always come from the menu server-side when a real
   // menuItemId is given — the caller's own price/name are only trusted for a
   // one-off custom line (no menuItemId), and even then must be a sane number.
@@ -1043,10 +1102,12 @@ ipcMain.handle('orders:addItem', (_e, { orderId, menuItemId, name, price, quanti
   });
 
   return addItem();
-});
+}
 
-ipcMain.handle('orders:updateItemQty', (_e, { orderItemId, quantity, orderId }) => {
-  requireLogin();
+ipcMain.handle('orders:addItem', (_e, payload) => addOrderItem(currentStaff, payload));
+
+function updateOrderItemQty(session, { orderItemId, quantity, orderId }) {
+  requireLoginFor(session);
   const qty = Number(quantity);
   if (qty <= 0) {
     db.prepare('DELETE FROM order_items WHERE id = ?').run(orderItemId);
@@ -1058,14 +1119,18 @@ ipcMain.handle('orders:updateItemQty', (_e, { orderItemId, quantity, orderId }) 
   }
   recalcOrder(orderId);
   return db.prepare('SELECT * FROM orders WHERE id = ?').get(orderId);
-});
+}
 
-ipcMain.handle('orders:removeItem', (_e, { orderItemId, orderId }) => {
-  requireLogin();
+ipcMain.handle('orders:updateItemQty', (_e, payload) => updateOrderItemQty(currentStaff, payload));
+
+function removeOrderItem(session, { orderItemId, orderId }) {
+  requireLoginFor(session);
   db.prepare('DELETE FROM order_items WHERE id = ?').run(orderItemId);
   recalcOrder(orderId);
   return db.prepare('SELECT * FROM orders WHERE id = ?').get(orderId);
-});
+}
+
+ipcMain.handle('orders:removeItem', (_e, payload) => removeOrderItem(currentStaff, payload));
 
 ipcMain.handle('orders:setDiscount', (_e, { orderId, discount }) => {
   requireLogin();
@@ -1285,8 +1350,8 @@ ipcMain.handle('receipt:testPrint', async () => {
 // fails, with no unfired items left to retry — so 'dialog' instead returns
 // itemIds and leaves the marking to receipt:confirmKotPrinted, called by the
 // renderer only after window.print() actually returns.
-ipcMain.handle('receipt:printKot', async (_e, { orderId }) => {
-  requireLogin();
+async function fireKot(session, orderId) {
+  requireLoginFor(session);
   const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(orderId);
   if (!order) throw new Error('Order not found');
   const items = db.prepare('SELECT * FROM order_items WHERE order_id = ? AND kot_fired_at IS NULL ORDER BY id').all(orderId);
@@ -1303,7 +1368,9 @@ ipcMain.handle('receipt:printKot', async (_e, { orderId }) => {
     .run(...ids);
 
   return { ...result, count: items.length };
-});
+}
+
+ipcMain.handle('receipt:printKot', (_e, { orderId }) => fireKot(currentStaff, orderId));
 
 // Companion to receipt:printKot's 'dialog' branch — see the comment there.
 // Called by the renderer once window.print() for the KOT has returned.
@@ -1472,6 +1539,12 @@ const SETTINGS_FIELDS = {
   printerNetworkHost: 'printer_network_host',
   printerNetworkPort: 'printer_network_port',
   printerPaperWidth: 'printer_paper_width', // '58' | '80' (mm)
+  // Mobile ordering server (see the "Mobile ordering server" section near
+  // the end of this file) — off by default, same reasoning as printerMode
+  // defaulting to 'dialog': existing installs must not suddenly start
+  // listening on the network.
+  mobileServerEnabled: 'mobile_server_enabled',
+  mobileServerPort: 'mobile_server_port',
 };
 
 ipcMain.handle('settings:get', () => {
@@ -1492,6 +1565,8 @@ ipcMain.handle('settings:get', () => {
     printerNetworkHost: map.printer_network_host || '',
     printerNetworkPort: Number(map.printer_network_port || 9100),
     printerPaperWidth: map.printer_paper_width || '80',
+    mobileServerEnabled: map.mobile_server_enabled === '1',
+    mobileServerPort: Number(map.mobile_server_port || 8080),
   };
 });
 
@@ -1505,5 +1580,215 @@ ipcMain.handle('settings:update', (_e, payload) => {
     const key = SETTINGS_FIELDS[field];
     if (key) upsert.run(key, String(value ?? ''));
   });
+  // Applies an enable/port change live, same as printer settings already
+  // apply live (getPrinterSettings() re-reads fresh on every print call).
+  syncMobileServer();
   return { success: true };
 });
+
+// mobile_server_enabled is stored as '1'/'0' text like every other
+// settings-table value (see settings:update's upsert above), not a real
+// boolean column — settings is a flat key/value store (schema.sql).
+function getMobileServerSettings(map = getSettingsMap()) {
+  return {
+    enabled: map.mobile_server_enabled === '1',
+    port: Number(map.mobile_server_port || 8080),
+  };
+}
+
+// First non-internal IPv4 address of any network interface — good enough
+// for "the WiFi this laptop is on" in the common single-NIC case; if a
+// machine has several active interfaces this just picks one, which is a
+// reasonable default for a feature whose whole premise is "same WiFi".
+function getLanIp() {
+  const interfaces = os.networkInterfaces();
+  for (const name of Object.keys(interfaces)) {
+    for (const iface of interfaces[name]) {
+      if (iface.family === 'IPv4' && !iface.internal) return iface.address;
+    }
+  }
+  return null;
+}
+
+ipcMain.handle('mobile:getServerInfo', async () => {
+  const { enabled, port } = getMobileServerSettings();
+  const lanIp = getLanIp();
+  const url = enabled && lanIp ? `http://${lanIp}:${port}` : null;
+  const qrDataUrl = url ? await QRCode.toDataURL(url, { margin: 1, width: 180 }) : null;
+  return { enabled, port, lanIp, url, qrDataUrl };
+});
+
+// ---------- Mobile ordering server ----------
+// A small HTTP+static-file server, in this same process, so waiters can
+// take dine-in orders and fire KOTs from their own phone/tablet over the
+// same WiFi as this machine. It reuses the exact same core functions (and
+// therefore the exact same money/tax/modifier/table-locking logic) as the
+// IPC handlers above — the only new thing is a second way to reach them,
+// authenticated by a per-device token (see `sessions`, near currentStaff)
+// instead of the desktop's single global currentStaff.
+//
+// Deliberately NOT built here: billing/payment, discounts, takeaway/
+// delivery, settings/reports/staff admin — all of that stays desktop-only
+// by simply never exposing a route for it.
+
+function sendJson(res, statusCode, body) {
+  const data = JSON.stringify(body);
+  res.writeHead(statusCode, {
+    'Content-Type': 'application/json; charset=utf-8',
+    'Content-Length': Buffer.byteLength(data),
+  });
+  res.end(data);
+}
+
+function readJsonBody(req) {
+  return new Promise((resolve, reject) => {
+    let raw = '';
+    req.on('data', (chunk) => {
+      raw += chunk;
+      if (raw.length > 1e6) { reject(new Error('Request body too large')); req.destroy(); }
+    });
+    req.on('end', () => {
+      if (!raw) return resolve({});
+      try { resolve(JSON.parse(raw)); } catch { reject(new Error('Invalid JSON body')); }
+    });
+    req.on('error', reject);
+  });
+}
+
+// Fixed whitelist of static files, not a general static-file server — the
+// mobile client is exactly these three files, so there's no path to serve
+// (and no path-traversal surface) beyond them.
+const MOBILE_STATIC_FILES = {
+  '/': { file: 'index.html', type: 'text/html; charset=utf-8' },
+  '/mobile.css': { file: 'mobile.css', type: 'text/css; charset=utf-8' },
+  '/app.js': { file: 'app.js', type: 'application/javascript; charset=utf-8' },
+};
+
+function serveMobileStatic(res, pathname) {
+  const entry = MOBILE_STATIC_FILES[pathname];
+  if (!entry) return false;
+  fs.readFile(path.join(__dirname, 'src', 'mobile', entry.file), (err, data) => {
+    if (err) return sendJson(res, 500, { error: 'Failed to load mobile client' });
+    res.writeHead(200, { 'Content-Type': entry.type });
+    res.end(data);
+  });
+  return true;
+}
+
+// Every route here requires a valid session token EXCEPT login — this is
+// the HTTP-layer equivalent of "you can't reach this screen without being
+// logged in", the same gate the desktop UI relies on for its own ungated
+// reads (tables:list, orders:listOpen, orders:get, menu:list,
+// modifiers:listGroups, all called via IPC with no per-handler check).
+const MOBILE_ROUTES = [
+  { method: 'GET', regex: /^\/api\/mobile\/tables$/, handler: () => listOpenTables() },
+  { method: 'GET', regex: /^\/api\/mobile\/orders\/open$/, handler: () => listOpenOrders() },
+  { method: 'GET', regex: /^\/api\/mobile\/orders\/(?<id>\d+)$/, handler: (session, params) => getOrderDetail(Number(params.id)) },
+  {
+    method: 'POST',
+    regex: /^\/api\/mobile\/orders$/,
+    // Hard-coded 'dine-in' + a required tableId — mobile only ever creates
+    // dine-in orders tied to a table, never takeaway/delivery, regardless
+    // of what a client sends (this is a server-side scope boundary, not
+    // just a UI choice in src/mobile/app.js).
+    handler: (session, params, body) => {
+      if (!body.tableId) { const err = new Error('A table is required'); err.statusCode = 400; throw err; }
+      return createOrder(session, { orderType: 'dine-in', tableId: Number(body.tableId), source: 'in-house' });
+    },
+  },
+  {
+    method: 'POST',
+    regex: /^\/api\/mobile\/orders\/(?<id>\d+)\/items$/,
+    handler: (session, params, body) => addOrderItem(session, { ...body, orderId: Number(params.id) }),
+  },
+  {
+    method: 'PATCH',
+    regex: /^\/api\/mobile\/orders\/(?<id>\d+)\/items\/(?<itemId>\d+)$/,
+    handler: (session, params, body) => updateOrderItemQty(session, {
+      orderId: Number(params.id), orderItemId: Number(params.itemId), quantity: body.quantity,
+    }),
+  },
+  {
+    method: 'DELETE',
+    regex: /^\/api\/mobile\/orders\/(?<id>\d+)\/items\/(?<itemId>\d+)$/,
+    handler: (session, params) => removeOrderItem(session, { orderId: Number(params.id), orderItemId: Number(params.itemId) }),
+  },
+  { method: 'GET', regex: /^\/api\/mobile\/menu$/, handler: () => listMenu() },
+  { method: 'GET', regex: /^\/api\/mobile\/menu\/(?<id>\d+)\/modifiers$/, handler: (session, params) => listModifierGroups(Number(params.id)) },
+  {
+    method: 'POST',
+    regex: /^\/api\/mobile\/orders\/(?<id>\d+)\/fire-kot$/,
+    // printerMode: 'dialog' only works because the desktop renderer calls
+    // window.print() itself (src/renderer.js) — there's no equivalent on a
+    // phone, so this is refused loudly here rather than silently no-op'ing
+    // or leaving items half-fired.
+    handler: (session, params) => {
+      if (getPrinterSettings().mode === 'dialog') {
+        const err = new Error('Kitchen printing is set to Dialog mode, which only works from the desktop app — ask the desktop to fire this KOT, or switch Settings > Printer to System/Network mode.');
+        err.statusCode = 409;
+        throw err;
+      }
+      return fireKot(session, Number(params.id));
+    },
+  },
+];
+
+function createMobileServer() {
+  return http.createServer(async (req, res) => {
+    try {
+      const { pathname } = new URL(req.url, 'http://localhost');
+
+      if (req.method === 'GET' && serveMobileStatic(res, pathname)) return;
+
+      if (req.method === 'POST' && pathname === '/api/mobile/login') {
+        const body = await readJsonBody(req);
+        const staff = findStaffByPin(body.pin);
+        if (!staff) return sendJson(res, 401, { error: 'Incorrect PIN' });
+        const token = crypto.randomBytes(24).toString('hex');
+        const session = { id: staff.id, name: staff.name, role: staff.role };
+        sessions.set(token, session);
+        return sendJson(res, 200, { token, staff: session });
+      }
+
+      const route = MOBILE_ROUTES.find((r) => r.method === req.method && r.regex.test(pathname));
+      if (!route) return sendJson(res, 404, { error: 'Not found' });
+
+      const token = (req.headers.authorization || '').replace(/^Bearer\s+/i, '');
+      const session = sessions.get(token);
+      if (!session) return sendJson(res, 401, { error: 'Not logged in — please log in again' });
+
+      const params = route.regex.exec(pathname).groups || {};
+      const body = (req.method === 'POST' || req.method === 'PATCH') ? await readJsonBody(req) : {};
+      const result = await route.handler(session, params, body);
+      sendJson(res, 200, result == null ? { success: true } : result);
+    } catch (err) {
+      sendJson(res, err.statusCode || 400, { error: err.message || 'Something went wrong' });
+    }
+  });
+}
+
+let mobileServer = null;
+
+function stopMobileServer() {
+  if (mobileServer) {
+    mobileServer.close();
+    mobileServer = null;
+  }
+}
+
+// Called at startup and again at the end of every settings:update — safe
+// to call unconditionally since it's idempotent (always stops whatever is
+// currently running first). Restarting drops in-flight HTTP connections
+// but NOT the `sessions` map itself, so logged-in staff stay logged in
+// across a settings save that happens to touch an unrelated field.
+function syncMobileServer() {
+  stopMobileServer();
+  const { enabled, port } = getMobileServerSettings();
+  if (!enabled) return;
+  mobileServer = createMobileServer();
+  mobileServer.on('error', (err) => {
+    dialog.showErrorBox('Mobile ordering', `Could not start the mobile ordering server on port ${port}: ${err.message}`);
+    mobileServer = null;
+  });
+  mobileServer.listen(port, '0.0.0.0');
+}

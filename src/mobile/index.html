@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+<title>Mobile Order</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600;9..144,700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/mobile.css" />
+</head>
+<body>
+
+<div id="app">
+
+  <!-- ===================== Login ===================== -->
+  <section id="screen-login" class="screen">
+    <h1 class="brand">Restaurant POS</h1>
+    <p class="hint">Enter your staff PIN</p>
+    <input id="login-pin" class="pin-display" type="password" inputmode="numeric" readonly />
+    <div class="keypad">
+      <button class="key" data-key="1">1</button>
+      <button class="key" data-key="2">2</button>
+      <button class="key" data-key="3">3</button>
+      <button class="key" data-key="4">4</button>
+      <button class="key" data-key="5">5</button>
+      <button class="key" data-key="6">6</button>
+      <button class="key" data-key="7">7</button>
+      <button class="key" data-key="8">8</button>
+      <button class="key" data-key="9">9</button>
+      <button class="key key-ghost" data-key="clear">Clear</button>
+      <button class="key" data-key="0">0</button>
+      <button class="key key-ghost" data-key="back">&#9003;</button>
+    </div>
+    <p id="login-error" class="error hidden"></p>
+    <button id="login-btn" class="btn btn-primary" disabled>Log in</button>
+  </section>
+
+  <!-- ===================== Tables ===================== -->
+  <section id="screen-tables" class="screen hidden">
+    <header class="topbar">
+      <span id="staff-name"></span>
+      <button id="logout-btn" class="btn-link">Log out</button>
+    </header>
+    <h2>Tables</h2>
+    <div id="table-grid" class="table-grid"></div>
+  </section>
+
+  <!-- ===================== Order ===================== -->
+  <section id="screen-order" class="screen hidden">
+    <header class="topbar">
+      <button id="back-to-tables-btn" class="btn-link">&larr; Tables</button>
+      <span id="order-table-name"></span>
+    </header>
+
+    <div id="order-items" class="order-items"></div>
+    <div class="order-total">Total: &#8377;<span id="order-total">0.00</span></div>
+
+    <h3>Add items</h3>
+    <div id="menu-list" class="menu-list"></div>
+
+    <button id="fire-kot-btn" class="btn btn-primary">Send to Kitchen</button>
+    <p id="order-error" class="error hidden"></p>
+  </section>
+
+  <!-- ===================== Modifier picker ===================== -->
+  <div id="modifier-modal" class="modal-backdrop hidden">
+    <div class="modal">
+      <h3 id="modifier-modal-title"></h3>
+      <div id="modifier-modal-groups"></div>
+      <div class="modal-actions">
+        <button id="modifier-cancel-btn" class="btn btn-ghost">Cancel</button>
+        <button id="modifier-add-btn" class="btn btn-primary">Add</button>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<script src="/app.js"></script>
+</body>
+</html>

@@ -48,9 +48,13 @@
             <option value="delivery">Delivery</option>
           </select>
         </label>
-        <label class="context-field">
+        <label id="table-select-field" class="context-field">
+          <span>Table</span>
+          <select id="table-select"></select>
+        </label>
+        <label id="table-label-field" class="context-field hidden">
           <span>Table / ref</span>
-          <input id="table-label" type="text" placeholder="e.g. T4" />
+          <input id="table-label" type="text" placeholder="e.g. call-ahead ref" />
         </label>
         <label class="context-field">
           <span>Source</span>
@@ -392,6 +396,28 @@
         </div>
 
         <button id="settings-printer-test-btn" type="button" class="btn btn-ghost" disabled>Test print</button>
+      </div>
+
+      <div class="settings-section">
+        <h3>Mobile ordering</h3>
+        <p class="settings-hint">Let staff take dine-in orders and fire KOTs from their own phone or tablet, over the same WiFi as this computer. Only works while this app is running and both devices share that network.</p>
+        <div class="settings-grid">
+          <label class="context-field checkbox-field">
+            <input id="settings-mobile-enabled" type="checkbox" />
+            <span>Allow phones/tablets on this WiFi to take orders</span>
+          </label>
+          <label class="context-field">
+            <span>Port</span>
+            <input id="settings-mobile-port" type="number" min="1" step="1" placeholder="8080" />
+          </label>
+        </div>
+        <div id="settings-mobile-info" class="settings-mobile-info hidden">
+          <div>
+            <p class="settings-mobile-hint">Open this address on a phone/tablet, or scan the QR code:</p>
+            <p id="settings-mobile-url" class="settings-mobile-url"></p>
+          </div>
+          <img id="settings-mobile-qr" class="settings-mobile-qr" alt="Mobile ordering QR code" />
+        </div>
       </div>
 
       <div class="settings-section">

@@ -313,6 +313,7 @@ async function loadReferenceData() {
   categories = await window.pos.categories.list();
   subcategories = await window.pos.subcategories.list();
   menuItems = await window.pos.menu.list();
+  restaurantTables = await window.pos.tables.list();
   const settings = await window.pos.settings.get();
   defaultTaxPercent = settings.defaultTaxPercent;
   renderCategoryTabs();
@@ -322,7 +323,37 @@ async function loadReferenceData() {
   populateSubcategoryParentSelect();
   populateBulkGstScopeSelect();
   renderCategoryManageList();
+  updateTableFieldVisibility();
   renderTicket();
+}
+
+// Dine-in orders pick a real table (linked by id, same as tapping a tile on
+// the Tables tab — this is what makes occupancy tracking work); takeaway/
+// delivery have no physical table, so they get a free-text reference
+// instead. Only one of the two fields is ever visible at a time.
+function populateTableSelect() {
+  const select = document.getElementById('table-select');
+  const currentValue = select.value;
+  select.innerHTML = restaurantTables.map((t) => {
+    const occupied = !!t.order_id;
+    const label = `${t.name}${t.seats ? ` (${t.seats} pax)` : ''}${occupied ? ' — occupied' : ''}`;
+    return `<option value="${t.id}" ${occupied ? 'disabled' : ''}>${escapeHtml(label)}</option>`;
+  }).join('');
+  if (restaurantTables.some((t) => String(t.id) === currentValue)) select.value = currentValue;
+}
+
+function updateTableFieldVisibility() {
+  const isDineIn = document.getElementById('order-type').value === 'dine-in';
+  document.getElementById('table-select-field').classList.toggle('hidden', !isDineIn);
+  document.getElementById('table-label-field').classList.toggle('hidden', isDineIn);
+  if (isDineIn) populateTableSelect();
+}
+
+document.getElementById('order-type').addEventListener('change', updateTableFieldVisibility);
+
+function resetTableFields() {
+  document.getElementById('table-label').value = '';
+  document.getElementById('table-select').value = '';
 }
 
 function renderCategoryManageList() {
@@ -543,7 +574,13 @@ document.getElementById('add-subcategory-btn').addEventListener('click', async (
 });
 
 // ---------------- Order ticket ----------------
-document.getElementById('new-order-btn').addEventListener('click', () => startNewOrder(false));
+document.getElementById('new-order-btn').addEventListener('click', async () => {
+  try {
+    await startNewOrder(false);
+  } catch (err) {
+    alert(`Could not start order: ${err.message}`);
+  }
+});
 
 async function startNewOrder(force) {
   if (!force && currentOrder) {
@@ -558,9 +595,16 @@ async function startNewOrder(force) {
     if (!proceed) return;
   }
   const orderType = document.getElementById('order-type').value;
-  const tableLabel = document.getElementById('table-label').value.trim();
   const source = document.getElementById('order-source').value;
-  currentOrder = await window.pos.orders.create({ orderType, tableLabel, source });
+  let tableLabel = '';
+  let tableId = null;
+  if (orderType === 'dine-in') {
+    const selected = document.getElementById('table-select').value;
+    if (selected) tableId = Number(selected);
+  } else {
+    tableLabel = document.getElementById('table-label').value.trim();
+  }
+  currentOrder = await window.pos.orders.create({ orderType, tableLabel, source, tableId });
   currentOrder.items = [];
   renderTicket();
 }
@@ -580,7 +624,7 @@ document.getElementById('cancel-order-btn').addEventListener('click', async () =
   try {
     await window.pos.orders.cancel(currentOrder.id);
     currentOrder = null;
-    document.getElementById('table-label').value = '';
+    resetTableFields();
     renderTicket();
   } catch (err) {
     alert(`Could not cancel order: ${err.message}`);
@@ -930,8 +974,9 @@ async function startOrderForTable(table) {
     order.items = [];
     currentOrder = order;
     document.getElementById('order-type').value = 'dine-in';
-    document.getElementById('table-label').value = table.name;
     document.getElementById('order-source').value = 'in-house';
+    updateTableFieldVisibility();
+    document.getElementById('table-select').value = String(table.id);
     renderTicket();
     switchToView('order');
   } catch (err) {
@@ -1485,7 +1530,7 @@ document.getElementById('receipt-close-btn').addEventListener('click', () => {
   receiptModal.classList.add('hidden');
   if (!viewingHistoricalReceipt) {
     currentOrder = null;
-    document.getElementById('table-label').value = '';
+    resetTableFields();
     renderTicket();
   }
   viewingHistoricalReceipt = false;
@@ -1601,11 +1646,20 @@ async function renderModifierManageGroups() {
     groups.forEach((g) => {
       const card = document.createElement('div');
       card.className = 'modifier-manage-group';
+      // A required group (min_select > 0) with fewer options than it needs
+      // makes the item permanently un-orderable — flag it here so an owner
+      // who just created the group (or deleted its last option, back when
+      // that was still possible) notices before a cashier hits it live.
+      const insufficientOptions = g.min_select > 0 && g.options.length < g.min_select;
+      const warningHtml = insufficientOptions
+        ? `<p class="modifier-manage-warning">Needs at least ${g.min_select} option(s) to be orderable — currently has ${g.options.length}.</p>`
+        : '';
       card.innerHTML = `
         <div class="modifier-manage-group-head">
           <span class="modifier-manage-group-name">${escapeHtml(g.name)} <span class="modifier-manage-group-range">(select ${g.min_select}-${g.max_select})</span></span>
           <button class="link-btn danger" data-action="delete-group">Delete group</button>
         </div>
+        ${warningHtml}
         <div class="modifier-manage-options"></div>
         <div class="modifier-manage-add-option">
           <input type="text" class="modifier-option-name-input" placeholder="Option name" />
@@ -1710,9 +1764,22 @@ async function loadSettings() {
   document.getElementById('settings-printer-paper-width').value = settings.printerPaperWidth;
   document.getElementById('settings-printer-network-host').value = settings.printerNetworkHost;
   document.getElementById('settings-printer-network-port').value = settings.printerNetworkPort;
+  document.getElementById('settings-mobile-enabled').checked = settings.mobileServerEnabled;
+  document.getElementById('settings-mobile-port').value = settings.mobileServerPort;
   await loadSystemPrinters(settings.printerSystemName);
   updatePrinterModeVisibility();
+  await loadMobileServerInfo();
   await renderStaffManageList();
+}
+
+// Paints the LAN URL + QR code for the mobile ordering server (see
+// mobile:getServerInfo in main.js) — shown only once it's actually
+// enabled and reachable (i.e. a LAN IP was found).
+async function loadMobileServerInfo() {
+  const info = await window.pos.mobile.getServerInfo();
+  document.getElementById('settings-mobile-info').classList.toggle('hidden', !info.url);
+  document.getElementById('settings-mobile-url').textContent = info.url || '';
+  document.getElementById('settings-mobile-qr').src = info.qrDataUrl || '';
 }
 
 // Populates the system-printer <select> from printers:listSystem. Pass
@@ -1815,8 +1882,14 @@ document.getElementById('settings-save-btn').addEventListener('click', async () 
       printerSystemName: document.getElementById('settings-printer-system-name').value.trim(),
       printerNetworkHost: document.getElementById('settings-printer-network-host').value.trim(),
       printerNetworkPort: Number(document.getElementById('settings-printer-network-port').value) || 9100,
+      // '1'/'0', not a raw boolean — settings:update stores every field via
+      // String(value), and getMobileServerSettings() in main.js checks for
+      // the literal string '1', not JS's String(true) === 'true'.
+      mobileServerEnabled: document.getElementById('settings-mobile-enabled').checked ? '1' : '0',
+      mobileServerPort: Number(document.getElementById('settings-mobile-port').value) || 8080,
     });
     defaultTaxPercent = defaultTaxValue;
+    await loadMobileServerInfo();
     btn.textContent = 'Saved';
     setTimeout(() => { btn.textContent = originalText; }, 1200);
   } catch (err) {

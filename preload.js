@@ -84,4 +84,7 @@ contextBridge.exposeInMainWorld('pos', {
     get: () => ipcRenderer.invoke('settings:get'),
     update: (payload) => ipcRenderer.invoke('settings:update', payload),
   },
+  mobile: {
+    getServerInfo: () => ipcRenderer.invoke('mobile:getServerInfo'),
+  },
 });

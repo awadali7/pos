@@ -19,7 +19,10 @@
   --font-mono: 'IBM Plex Mono', monospace;
 }
 
-* { box-sizing: border-box; }
+* { box-sizing: border-box;
+::-webkit-scrollbar{
+  display: none;
+} }
 
 html, body {
   margin: 0;
@@ -472,6 +475,33 @@ button, input, select {
 #settings-printer-test-btn { margin-top: 10px; }
 .settings-field-wide { grid-column: 1 / -1; }
 
+.settings-mobile-info {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin-top: 14px;
+}
+.settings-mobile-hint {
+  color: var(--text-on-ink-dim);
+  font-size: 13px;
+  margin: 0 0 6px;
+}
+.settings-mobile-url {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  color: var(--text-on-ink);
+  word-break: break-all;
+  margin: 0;
+}
+.settings-mobile-qr {
+  width: 120px;
+  height: 120px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: #fff;
+  flex-shrink: 0;
+}
+
 .category-manage-list {
   display: flex;
   flex-direction: column;
@@ -700,6 +730,15 @@ button, input, select {
   padding: 24px;
   width: 340px;
   max-width: 90vw;
+  /* Without a cap, a modal whose content grows past the viewport (e.g. the
+     payment modal with several split-payment tenders added, or on the
+     app's minimum 680px window height) has no scroll mechanism at all —
+     content past the bottom of the screen is genuinely unreachable, not
+     just visually clipped. This is a no-op for every modal short enough to
+     already fit (the overwhelming majority) and only kicks in for the ones
+     that would otherwise overflow the screen. */
+  max-height: 90vh;
+  overflow-y: auto;
 }
 .modal h3 {
   font-family: var(--font-display);
@@ -860,6 +899,7 @@ button, input, select {
 }
 .modifier-manage-group-name { font-weight: 600; }
 .modifier-manage-group-range { font-weight: 400; font-size: 12px; color: var(--text-on-paper-dim); }
+.modifier-manage-warning { color: var(--brick); font-size: 12px; margin: 0 0 8px; }
 .modifier-manage-options { display: flex; flex-direction: column; gap: 4px; margin-bottom: 8px; }
 .modifier-manage-option-row {
   display: flex;
@@ -869,6 +909,13 @@ button, input, select {
 }
 .modifier-manage-option-row span:first-child { flex: 1; }
 .modifier-manage-add-option { display: flex; gap: 8px; }
+/* Same bug as the split-payment row and the New-group fields above: plain
+   <input>s default to their native intrinsic width (~170px) and, as flex
+   items, refuse to shrink below it — two of them plus a button here add up
+   to more than a modifier card's content width inside a 420px modal, and
+   the overflowing element visually escapes the card/modal entirely instead
+   of just looking cramped. */
+.modifier-manage-add-option input { flex: 1; min-width: 0; }
 .modifier-manage-add-option input { flex: 1; min-width: 0; }
 .receipt-qr img { width: 120px; height: 120px; }
 .receipt-footer { text-align: center; font-style: italic; margin-top: 8px; font-size: 11px; }
