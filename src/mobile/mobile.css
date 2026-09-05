@@ -195,8 +195,11 @@ button, input { font-family: inherit; font-size: 16px; }
   background: var(--ink-soft);
   color: var(--text-on-ink);
 }
+.menu-item-row.unavailable { opacity: 0.4; }
 .menu-item-name { font-weight: 500; }
+.menu-item-price-col { display: flex; flex-direction: column; align-items: flex-end; }
 .menu-item-price { color: var(--text-on-ink-dim); font-size: 13px; }
+.menu-item-stock { color: var(--text-on-ink-dim); font-size: 11px; }
 
 .modal-backdrop {
   position: fixed;

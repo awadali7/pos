@@ -215,6 +215,11 @@ button, input, select {
   color: var(--copper);
   font-size: 13px;
 }
+.menu-tile-stock {
+  display: block;
+  font-size: 11px;
+  color: var(--text-on-ink-dim);
+}
 .table-tile-meta {
   font-size: 12px;
   color: var(--text-on-ink-dim);
@@ -707,6 +712,15 @@ button, input, select {
   border-bottom: 1px solid var(--ink-soft);
 }
 .item-table td:nth-child(3) { font-family: var(--font-mono); }
+.stock-input {
+  width: 64px;
+  background: var(--ink);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  color: var(--text-on-ink);
+  padding: 4px 6px;
+  text-align: center;
+}
 .status-pill {
   display: inline-block;
   padding: 3px 10px;
@@ -720,6 +734,7 @@ button, input, select {
 .status-pill.paid { background: rgba(92,122,82,0.25); color: #9DBB90; }
 .status-pill.cancelled { background: rgba(156,59,46,0.25); color: #D08B7E; }
 .status-pill.source-zomato { background: rgba(226,55,68,0.25); color: #E8848C; cursor: default; }
+.status-pill.locked { cursor: default; }
 .row-actions { display: flex; gap: 8px; }
 .link-btn {
   background: none; border: none; cursor: pointer;
@@ -773,6 +788,8 @@ button, input, select {
 .checkbox-field { flex-direction: row; align-items: center; gap: 8px; }
 .checkbox-field input { width: auto; }
 .modal-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 16px; }
+.notice-modal { width: 380px; }
+#notice-modal-message { margin: 0; line-height: 1.5; white-space: pre-line; }
 .modal-total { font-size: 14px; }
 .modal-total strong { font-family: var(--font-mono); }
 

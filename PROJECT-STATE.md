@@ -13,7 +13,7 @@ documentation — see [README.md](README.md) for what the app does.
 | `staff` | `needsSetup`, `createFirstOwner`, `login`, `logout`, `whoAmI`, `list`, `add`, `update`, `delete` |
 | `categories` | `list`, `add`, `delete` |
 | `subcategories` | `list`, `add`, `delete` |
-| `menu` | `list`, `add`, `update`, `delete`, `toggleAvailability`, `bulkSetGstRate` |
+| `menu` | `list`, `add`, `update`, `delete`, `toggleAvailability`, `bulkSetGstRate`, `updateStock` |
 | `modifiers` | `listGroups`, `addGroup`, `deleteGroup`, `addOption`, `deleteOption` |
 | `tables` | `list`, `add`, `delete` |
 | `orders` | `listOpen`, `listAll`, `create`, `get`, `addItem`, `updateItemQty`, `removeItem`, `setDiscount`, `cancel` |
@@ -42,7 +42,7 @@ no other path from renderer to main process.
 - `shifts` (id, opened_at, opened_by_staff_id → staff, opened_by_name, opening_float, opening_payment_id, closed_at, closed_by_staff_id → staff, closed_by_name, cash_sales, card_sales, upi_sales, order_count, expected_cash, counted_cash, notes) — cash-drawer shift/reconciliation. At most one row with `closed_at IS NULL` (enforced in `shifts:open`, app-level). `opening_payment_id` is the last `order_payments.id` that existed when the shift opened — the boundary for "this shift's sales", not a timestamp.
 - `categories` (id, name, sort_order)
 - `subcategories` (id, name, category_id → categories, sort_order)
-- `menu_items` (id, name, price, category_id, subcategory_id, is_available, hsn_code, gst_rate, created_at)
+- `menu_items` (id, name, price, category_id, subcategory_id, is_available, hsn_code, gst_rate, stock_quantity, created_at) — `stock_quantity` is nullable: NULL means untracked (every item's default, behaves exactly as before this column existed). A real number makes `is_available` self-managed — `adjustStock()` in `main.js` decrements it when an order line is added and restores it when removed/qty-reduced/the order is cancelled, flipping `is_available` at the zero boundary each time. `menu:updateStock` is the dedicated action that sets it (or clears back to untracked); `menu:add`/`menu:update` don't touch it. Because availability is self-managed once tracked, `menu:toggleAvailability` refuses stock-tracked items (throws — use `menu:updateStock` instead) so a manual flip can't be silently reverted by the next order that touches the item's stock.
 - `restaurant_tables` (id, name, seats, sort_order)
 - `orders` (id, order_type, table_label, table_id → restaurant_tables, source, status, subtotal, tax_percent, tax_amount, discount, total, payment_mode, invoice_number, created_at, paid_at, created_by_staff_id → staff, created_by_name, closed_by_staff_id → staff, closed_by_name, customer_phone, customer_name) — `created_by_name`/`closed_by_name` are snapshots (same reasoning as `order_items.item_name`) so attribution survives a staff account being deleted. `customer_phone`/`customer_name` are optional, set at checkout (`billing:finalize`) — no separate customers table; `customers:lookup` just matches on `customer_phone` across past orders.
 - `order_items` (id, order_id → orders, menu_item_id → menu_items, item_name, unit_price, quantity, notes, hsn_code, gst_rate, tax_amount, kot_fired_at) — `item_name`/`hsn_code` are snapshots at add-time, deliberately not live joins, so order history survives later menu edits. `unit_price` already includes any selected modifiers' price deltas (folded in at add-time). `kot_fired_at` (nullable) marks whether/when this line was sent to the kitchen — NULL means not yet fired. In `printer_mode: 'dialog'`, marking is a two-step handshake: `receipt:printKot` returns the candidate `itemIds` without marking them, and only `receipt:confirmKotPrinted` (called by the renderer after its own `window.print()` returns) actually sets `kot_fired_at` — so a cancelled print dialog leaves the items resendable instead of silently marking them fired. `system`/`network` modes mark fired immediately inside `receipt:printKot` itself, since those already perform real I/O before returning.
@@ -55,7 +55,13 @@ no other path from renderer to main process.
 `orders.status` is one of `open | paid | cancelled` (schema CHECK). All
 money mutation (add/remove item, qty change, discount edit) funnels
 through `recalcOrder()` in `main.js` (~line 121), which also clamps
-discount to `[0, subtotal + tax]`.
+discount to `[0, subtotal + tax]`. The same four mutation points
+(`addOrderItem`, `updateOrderItemQty`, `removeOrderItem`, `orders:cancel`)
+also call `adjustStock()` for any line whose menu item is stock-tracked —
+consuming stock when a line is added/increased, restoring it when
+removed/decreased/the order is cancelled. `billing:finalize` does not
+touch stock — it was already deducted at add-time, and a paid order's
+items are never edited afterward.
 
 ## Views (`src/renderer.js` `VIEWS` array / `src/index.html` `#view-*`)
 

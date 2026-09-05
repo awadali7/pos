@@ -246,16 +246,23 @@ function renderCategoryTabs() {
 function renderMenuList() {
   const wrap = document.getElementById('menu-list');
   const query = searchQuery.trim().toLowerCase();
+  // Unavailable items stay in the list, grayed out/disabled — matching
+  // the desktop Take Order grid (renderMenuGrid() in src/renderer.js),
+  // which never filters them out either. Hiding them entirely would make
+  // an item that just ran out of stock silently vanish with no
+  // explanation, instead of staff seeing why it can't be tapped.
   const filtered = menuItems.filter((m) => {
-    if (!m.is_available) return false;
     if (activeCategory !== 'All' && (m.category_name || 'Other') !== activeCategory) return false;
     if (query && !m.name.toLowerCase().includes(query)) return false;
     return true;
   });
   wrap.innerHTML = filtered.length ? filtered.map((m) => `
-    <button class="menu-item-row" data-item-id="${m.id}">
+    <button class="menu-item-row ${m.is_available ? '' : 'unavailable'}" data-item-id="${m.id}" ${m.is_available ? '' : 'disabled'}>
       <span class="menu-item-name">${escapeHtml(m.name)}</span>
-      <span class="menu-item-price">&#8377;${money(m.price)}</span>
+      <span class="menu-item-price-col">
+        <span class="menu-item-price">&#8377;${money(m.price)}</span>
+        ${m.stock_quantity != null ? `<span class="menu-item-stock">${m.stock_quantity} left</span>` : ''}
+      </span>
     </button>
   `).join('') : '<p class="hint">No items match.</p>';
   wrap.querySelectorAll('.menu-item-row').forEach((row) => {

@@ -277,6 +277,7 @@
             <th>HSN</th>
             <th>GST %</th>
             <th>Price</th>
+            <th>Stock</th>
             <th>Status</th>
             <th></th>
           </tr>
@@ -707,6 +708,20 @@
         <button type="button" class="btn btn-ghost auth-key" data-key="back">&larr;</button>
       </div>
       <button id="auth-login-btn" class="btn btn-primary btn-block">Log in</button>
+    </div>
+  </div>
+</div>
+
+<!-- ===================== Notice / confirm modal ===================== -->
+<!-- Shared by every alert()/confirm() in renderer.js — see the window.alert
+     override and confirmDialog() near the top of that file. One modal,
+     re-labelled per use rather than one markup block per call site. -->
+<div id="notice-modal" class="modal-backdrop hidden">
+  <div class="modal notice-modal">
+    <p id="notice-modal-message"></p>
+    <div class="modal-actions">
+      <button id="notice-modal-cancel-btn" class="btn btn-ghost hidden">Cancel</button>
+      <button id="notice-modal-ok-btn" class="btn btn-primary">OK</button>
     </div>
   </div>
 </div>

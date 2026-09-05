@@ -20,6 +20,57 @@ let openShift = null; // the currently open shift row (or null), refreshed after
 const money = (n) => Number(n || 0).toFixed(2);
 const capitalize = (s) => s.charAt(0).toUpperCase() + s.slice(1);
 
+// ---------------- Notice / confirm modal ----------------
+// Replaces the native alert()/confirm() (OS-chrome dialogs — and for IPC
+// errors, alert() would otherwise show Electron's own "Error invoking
+// remote method 'x:y': Error: ..." wrapper text verbatim) with the app's
+// own styled modal, reusing the same .modal-backdrop/.modal markup every
+// other modal here already uses.
+function cleanErrorMessage(message) {
+  return String(message)
+    .replace(/^Error invoking remote method '[^']*':\s*/, '')
+    .replace(/^Error:\s*/, '');
+}
+
+function showNoticeModal(message, { showCancel } = {}) {
+  return new Promise((resolve) => {
+    const backdrop = document.getElementById('notice-modal');
+    document.getElementById('notice-modal-message').textContent = cleanErrorMessage(message);
+    const cancelBtn = document.getElementById('notice-modal-cancel-btn');
+    const okBtn = document.getElementById('notice-modal-ok-btn');
+    cancelBtn.classList.toggle('hidden', !showCancel);
+    okBtn.textContent = showCancel ? 'Confirm' : 'OK';
+
+    function cleanup(result) {
+      backdrop.classList.add('hidden');
+      okBtn.removeEventListener('click', onOk);
+      cancelBtn.removeEventListener('click', onCancel);
+      resolve(result);
+    }
+    function onOk() { cleanup(true); }
+    function onCancel() { cleanup(false); }
+    okBtn.addEventListener('click', onOk);
+    cancelBtn.addEventListener('click', onCancel);
+    backdrop.classList.remove('hidden');
+    okBtn.focus();
+  });
+}
+
+// Fire-and-forget, matching native alert()'s undefined return — every
+// existing `alert(...)` call site in this file gets the styled modal (and
+// cleaned-up error text) automatically, with no call site changes needed:
+// none of them depend on alert()'s actual blocking behavior, they're
+// always the last thing done in their branch.
+window.alert = (message) => { showNoticeModal(message, { showCancel: false }); };
+
+// confirm() is genuinely synchronous by spec and can't be polyfilled the
+// same way alert() was — every `confirm(...)` call site below is instead
+// written as `await confirmDialog(...)` (all were already inside async
+// functions).
+function confirmDialog(message) {
+  return showNoticeModal(message, { showCancel: true });
+}
+
 // ---------------- Staff login / setup ----------------
 // The overlay (#auth-screen) visually covers the whole window until login
 // succeeds — that's a UX gate, not the real access control. The real
@@ -378,7 +429,7 @@ function renderCategoryManageList() {
       `).join('')}
     `;
     row.querySelector('[data-action="delete-category"]').addEventListener('click', async () => {
-      if (!confirm(`Delete category "${c.name}"? Its subcategories will be removed too.`)) return;
+      if (!(await confirmDialog(`Delete category "${c.name}"? Its subcategories will be removed too.`))) return;
       try {
         await window.pos.categories.delete(c.id);
         await reloadCategoryData();
@@ -389,7 +440,7 @@ function renderCategoryManageList() {
     row.querySelectorAll('[data-action="delete-subcategory"]').forEach((btn) => {
       btn.addEventListener('click', async () => {
         const sub = subs.find((s) => s.id === Number(btn.dataset.id));
-        if (!confirm(`Delete subcategory "${sub.name}"?`)) return;
+        if (!(await confirmDialog(`Delete subcategory "${sub.name}"?`))) return;
         try {
           await window.pos.subcategories.delete(sub.id);
           await reloadCategoryData();
@@ -479,6 +530,7 @@ function renderMenuGrid() {
     tile.innerHTML = `
       <span class="menu-tile-name">${escapeHtml(item.name)}</span>
       <span class="menu-tile-price">₹${money(item.price)}</span>
+      ${item.stock_quantity != null ? `<span class="menu-tile-stock">${item.stock_quantity} left</span>` : ''}
     `;
     tile.addEventListener('click', () => addItemToOrder(item));
     grid.appendChild(tile);
@@ -532,7 +584,7 @@ document.getElementById('bulk-gst-apply-btn').addEventListener('click', async ()
     : menuItems.length;
   const scopeCategory = categoryId ? categories.find((c) => c.id === categoryId) : null;
   const scopeLabel = scopeCategory ? scopeCategory.name : 'all items';
-  if (!confirm(`Set GST % to ${rate}% for ${affected} item(s) in ${scopeLabel}?`)) return;
+  if (!(await confirmDialog(`Set GST % to ${rate}% for ${affected} item(s) in ${scopeLabel}?`))) return;
 
   try {
     await window.pos.menu.bulkSetGstRate({ gstRate: rate, categoryId });
@@ -589,7 +641,7 @@ async function startNewOrder(force) {
       return;
     }
     const label = currentOrder.table_label ? ` (${currentOrder.table_label})` : '';
-    const proceed = confirm(
+    const proceed = await confirmDialog(
       `Order #${currentOrder.id}${label} is still open with items in it. Start a separate new order?\n\nThe current one stays open — resume it later from the Orders tab.`
     );
     if (!proceed) return;
@@ -620,7 +672,7 @@ document.getElementById('cancel-order-btn').addEventListener('click', async () =
   const warning = itemCount > 0
     ? `Cancel order #${currentOrder.id}? It has ${itemCount} item(s) on it — this can't be undone.`
     : `Cancel order #${currentOrder.id}?`;
-  if (!confirm(warning)) return;
+  if (!(await confirmDialog(warning))) return;
   try {
     await window.pos.orders.cancel(currentOrder.id);
     currentOrder = null;
@@ -933,7 +985,7 @@ function renderTableManageList() {
       <button class="link-btn danger" data-action="delete-table" data-id="${t.id}">Delete</button>
     `;
     row.querySelector('[data-action="delete-table"]').addEventListener('click', async () => {
-      if (!confirm(`Delete table "${t.name}"?`)) return;
+      if (!(await confirmDialog(`Delete table "${t.name}"?`))) return;
       try {
         await window.pos.tables.delete(t.id);
         await loadTables();
@@ -964,7 +1016,7 @@ document.getElementById('add-table-btn').addEventListener('click', async () => {
 async function startOrderForTable(table) {
   if (currentOrder && currentOrder.items && currentOrder.items.length > 0) {
     const label = currentOrder.table_label ? ` (${currentOrder.table_label})` : '';
-    const proceed = confirm(
+    const proceed = await confirmDialog(
       `Order #${currentOrder.id}${label} is still open with items in it. Start table "${table.name}" as a separate new order?\n\nThe current one stays open — resume it later from the Orders tab.`
     );
     if (!proceed) return;
@@ -1067,7 +1119,7 @@ function renderOrdersTable() {
       cancelBtn.className = 'link-btn danger';
       cancelBtn.textContent = 'Cancel';
       cancelBtn.addEventListener('click', async () => {
-        if (!confirm(`Cancel order #${o.id}? This can't be undone.`)) return;
+        if (!(await confirmDialog(`Cancel order #${o.id}? This can't be undone.`))) return;
         try {
           await window.pos.orders.cancel(o.id);
           if (currentOrder && currentOrder.id === o.id) {
@@ -1600,7 +1652,8 @@ function renderItemTable() {
       <td>${escapeHtml(item.hsn_code || '—')}</td>
       <td>${item.gst_rate}%</td>
       <td>₹${money(item.price)}</td>
-      <td><span class="status-pill ${item.is_available ? 'available' : 'unavailable'}">${item.is_available ? 'Available' : 'Unavailable'}</span></td>
+      <td><input type="number" class="stock-input" min="0" step="1" placeholder="∞" value="${item.stock_quantity ?? ''}" /></td>
+      <td><span class="status-pill ${item.is_available ? 'available' : 'unavailable'}${item.stock_quantity != null ? ' locked' : ''}" ${item.stock_quantity != null ? 'title="Stock-tracked — availability follows the stock quantity"' : ''}>${item.is_available ? 'Available' : 'Unavailable'}</span></td>
       <td><div class="row-actions">
         <button class="link-btn" data-action="edit">Edit</button>
         <button class="link-btn" data-action="modifiers">Modifiers</button>
@@ -1610,17 +1663,42 @@ function renderItemTable() {
     tr.querySelector('[data-action="edit"]').addEventListener('click', () => openItemModal(item));
     tr.querySelector('[data-action="modifiers"]').addEventListener('click', () => openModifierManageModal(item));
     tr.querySelector('[data-action="delete"]').addEventListener('click', async () => {
-      if (!confirm(`Delete "${item.name}"?`)) return;
+      if (!(await confirmDialog(`Delete "${item.name}"?`))) return;
       await window.pos.menu.delete(item.id);
       menuItems = await window.pos.menu.list();
       renderMenuGrid();
       renderItemTable();
     });
-    tr.querySelector('.status-pill').addEventListener('click', async () => {
-      await window.pos.menu.toggleAvailability(item.id);
-      menuItems = await window.pos.menu.list();
-      renderMenuGrid();
-      renderItemTable();
+    // Stock-tracked items have their availability driven entirely by
+    // adjustStock() in main.js — no click handler here, since toggling it
+    // manually would just get silently overwritten by the next order that
+    // touches this item's stock (see menu:toggleAvailability's own guard).
+    if (item.stock_quantity == null) {
+      tr.querySelector('.status-pill').addEventListener('click', async () => {
+        try {
+          await window.pos.menu.toggleAvailability(item.id);
+          menuItems = await window.pos.menu.list();
+          renderMenuGrid();
+          renderItemTable();
+        } catch (err) {
+          alert(`Could not update availability: ${err.message}`);
+        }
+      });
+    }
+    // Blank = stop tracking stock (item goes back to a plain manual
+    // is_available toggle); a number makes availability self-managed from
+    // here on (see adjustStock()/menu:updateStock in main.js).
+    tr.querySelector('.stock-input').addEventListener('change', async (e) => {
+      const raw = e.target.value.trim();
+      try {
+        await window.pos.menu.updateStock({ id: item.id, stockQuantity: raw === '' ? null : Number(raw) });
+        menuItems = await window.pos.menu.list();
+        renderMenuGrid();
+        renderItemTable();
+      } catch (err) {
+        alert(`Could not update stock: ${err.message}`);
+        e.target.value = item.stock_quantity ?? '';
+      }
     });
     tbody.appendChild(tr);
   });
@@ -1687,7 +1765,7 @@ async function renderModifierManageGroups() {
         optionsWrap.appendChild(row);
       });
       card.querySelector('[data-action="delete-group"]').addEventListener('click', async () => {
-        if (!confirm(`Delete modifier group "${g.name}" and all its options?`)) return;
+        if (!(await confirmDialog(`Delete modifier group "${g.name}" and all its options?`))) return;
         try {
           await window.pos.modifiers.deleteGroup(g.id);
         } catch (err) {
@@ -2007,7 +2085,7 @@ async function renderStaffManageList() {
     });
 
     row.querySelector('[data-action="delete"]').addEventListener('click', async () => {
-      if (!confirm(`Delete staff account "${s.name}"? This can't be undone — past orders keep their attribution either way.`)) return;
+      if (!(await confirmDialog(`Delete staff account "${s.name}"? This can't be undone — past orders keep their attribution either way.`))) return;
       try {
         await window.pos.staff.delete(s.id);
         await syncSessionAfterStaffChange();

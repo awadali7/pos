@@ -78,6 +78,12 @@ CREATE TABLE IF NOT EXISTS menu_items (
     is_available    INTEGER NOT NULL DEFAULT 1 CHECK (is_available IN (0, 1)),
     hsn_code        TEXT,
     gst_rate        NUMERIC(5, 2) NOT NULL DEFAULT 5,
+    -- NULL = not stock-tracked (every item's default) — behaves exactly as
+    -- before this column existed. A real number makes is_available
+    -- self-managed: order handlers decrement it on add/increment on
+    -- remove-or-cancel and flip is_available at the zero boundary
+    -- (adjustStock() in main.js), rather than it being a purely manual toggle.
+    stock_quantity  INTEGER CHECK (stock_quantity IS NULL OR stock_quantity >= 0),
     created_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 

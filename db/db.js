@@ -28,6 +28,7 @@ function ensureColumn(table, column, definition) {
 
 ensureColumn('menu_items', 'hsn_code', 'TEXT');
 ensureColumn('menu_items', 'gst_rate', 'NUMERIC(5,2) NOT NULL DEFAULT 5');
+ensureColumn('menu_items', 'stock_quantity', 'INTEGER CHECK (stock_quantity IS NULL OR stock_quantity >= 0)');
 ensureColumn('order_items', 'hsn_code', 'TEXT');
 ensureColumn('order_items', 'gst_rate', 'NUMERIC(5,2) NOT NULL DEFAULT 0');
 ensureColumn('order_items', 'tax_amount', 'NUMERIC(10,2) NOT NULL DEFAULT 0');

@@ -134,6 +134,21 @@ function lineTax(unitPrice, quantity, gstRate) {
   return +((Number(unitPrice) * quantity * Number(gstRate)) / 100).toFixed(2);
 }
 
+// Applies `delta` to a menu item's stock_quantity (negative = consume,
+// e.g. added to an order; positive = restore, e.g. removed/cancelled) and
+// keeps is_available in lockstep at the zero boundary — auto-hides once
+// stock runs out, auto-reappears once it's above zero again. No-ops for
+// untracked items (stock_quantity IS NULL) and one-off custom lines
+// (menuItemId null, same guard addOrderItem already applies for those).
+function adjustStock(menuItemId, delta) {
+  if (!menuItemId || !delta) return;
+  const item = db.prepare('SELECT stock_quantity FROM menu_items WHERE id = ?').get(menuItemId);
+  if (!item || item.stock_quantity == null) return;
+  const next = Math.max(0, item.stock_quantity + delta);
+  db.prepare('UPDATE menu_items SET stock_quantity = ?, is_available = ? WHERE id = ?')
+    .run(next, next > 0 ? 1 : 0, menuItemId);
+}
+
 function assertValidGstRate(rate) {
   const n = Number(rate);
   if (!Number.isFinite(n) || n < 0) throw new Error('GST rate must be a non-negative number');
@@ -880,7 +895,36 @@ ipcMain.handle('menu:delete', (_e, id) => {
 
 ipcMain.handle('menu:toggleAvailability', (_e, id) => {
   requireRole('owner', 'manager');
+  // Once an item is stock-tracked, is_available is driven entirely by
+  // stock_quantity (see adjustStock()) — a manual flip here would just get
+  // silently overwritten by the next order that touches this item's stock,
+  // so refuse it up front instead of leaving a confusing dead control.
+  const item = db.prepare('SELECT stock_quantity FROM menu_items WHERE id = ?').get(id);
+  if (!item) throw new Error('Menu item not found');
+  if (item.stock_quantity != null) {
+    throw new Error('This item is stock-tracked — its availability follows the stock quantity. Set stock to 0 to mark it unavailable, or clear stock tracking to toggle it manually.');
+  }
   return db.prepare('UPDATE menu_items SET is_available = NOT is_available WHERE id = ? RETURNING *').get(id);
+});
+
+// A quick, dedicated action (like toggleAvailability above) rather than a
+// field on the add/edit modal — restocking happens far more often than a
+// full item edit. stockQuantity null/'' clears tracking entirely (item goes
+// back to being always-available, manually toggled, like every item
+// today); a real number makes is_available self-managed from here on
+// (see adjustStock() for the same rule applied at order time).
+ipcMain.handle('menu:updateStock', (_e, { id, stockQuantity }) => {
+  requireRole('owner', 'manager');
+  const qty = stockQuantity === null || stockQuantity === '' || stockQuantity === undefined
+    ? null : Number(stockQuantity);
+  if (qty != null && (!Number.isInteger(qty) || qty < 0)) {
+    throw new Error('Stock must be a non-negative whole number, or blank to stop tracking it');
+  }
+  const existing = db.prepare('SELECT is_available FROM menu_items WHERE id = ?').get(id);
+  if (!existing) throw new Error('Menu item not found');
+  const nextAvailable = qty == null ? existing.is_available : (qty > 0 ? 1 : 0);
+  return db.prepare('UPDATE menu_items SET stock_quantity = ?, is_available = ? WHERE id = ? RETURNING *')
+    .get(qty, nextAvailable, id);
 });
 
 ipcMain.handle('menu:bulkSetGstRate', (_e, { gstRate, categoryId }) => {
@@ -1047,7 +1091,7 @@ function addOrderItem(session, { orderId, menuItemId, name, price, quantity, not
   // menuItemId is given — the caller's own price/name are only trusted for a
   // one-off custom line (no menuItemId), and even then must be a sane number.
   const menuItem = menuItemId
-    ? db.prepare('SELECT name, price, hsn_code, gst_rate FROM menu_items WHERE id = ?').get(menuItemId)
+    ? db.prepare('SELECT name, price, hsn_code, gst_rate, stock_quantity FROM menu_items WHERE id = ?').get(menuItemId)
     : null;
   if (menuItemId && !menuItem) throw new Error('Menu item not found');
 
@@ -1097,6 +1141,10 @@ function addOrderItem(session, { orderId, menuItemId, name, price, quantity, not
   const qty = quantity == null ? 1 : Number(quantity);
   if (!Number.isInteger(qty) || qty <= 0) throw new Error('Quantity must be a positive whole number');
 
+  if (menuItemId && menuItem.stock_quantity != null && menuItem.stock_quantity < qty) {
+    throw new Error(`Only ${menuItem.stock_quantity} "${menuItem.name}" left in stock`);
+  }
+
   // One transaction, not three independent statements — without this, a
   // failure between the order_items insert and the order_item_modifiers
   // inserts (e.g. a disk/lock error on the 2nd of 2 selected options) would
@@ -1114,6 +1162,7 @@ function addOrderItem(session, { orderId, menuItemId, name, price, quantity, not
       selectedOptions.forEach((o) => insertMod.run(orderItem.id, o.name, o.price_delta));
     }
 
+    adjustStock(menuItemId, -qty);
     recalcOrder(orderId);
     return db.prepare('SELECT * FROM orders WHERE id = ?').get(orderId);
   });
@@ -1126,13 +1175,27 @@ ipcMain.handle('orders:addItem', (_e, payload) => addOrderItem(currentStaff, pay
 function updateOrderItemQty(session, { orderItemId, quantity, orderId }) {
   requireLoginFor(session);
   const qty = Number(quantity);
+  const line = db.prepare('SELECT menu_item_id, quantity, unit_price, gst_rate FROM order_items WHERE id = ?').get(orderItemId);
+  if (!line) throw new Error('Order item not found');
+
   if (qty <= 0) {
     db.prepare('DELETE FROM order_items WHERE id = ?').run(orderItemId);
+    adjustStock(line.menu_item_id, line.quantity);
   } else {
     if (!Number.isInteger(qty)) throw new Error('Quantity must be a whole number');
-    const line = db.prepare('SELECT unit_price, gst_rate FROM order_items WHERE id = ?').get(orderItemId);
+    // Positive delta means claiming MORE than what's already reserved for
+    // this line, so it needs the same stock check addOrderItem does —
+    // negative delta (reducing quantity) always has stock to give back.
+    const delta = qty - line.quantity;
+    if (delta > 0 && line.menu_item_id) {
+      const stockRow = db.prepare('SELECT stock_quantity, name FROM menu_items WHERE id = ?').get(line.menu_item_id);
+      if (stockRow && stockRow.stock_quantity != null && stockRow.stock_quantity < delta) {
+        throw new Error(`Only ${stockRow.stock_quantity} more "${stockRow.name}" left in stock`);
+      }
+    }
     db.prepare('UPDATE order_items SET quantity = ?, tax_amount = ? WHERE id = ?')
       .run(qty, lineTax(line.unit_price, qty, line.gst_rate), orderItemId);
+    adjustStock(line.menu_item_id, -delta);
   }
   recalcOrder(orderId);
   return db.prepare('SELECT * FROM orders WHERE id = ?').get(orderId);
@@ -1142,7 +1205,9 @@ ipcMain.handle('orders:updateItemQty', (_e, payload) => updateOrderItemQty(curre
 
 function removeOrderItem(session, { orderItemId, orderId }) {
   requireLoginFor(session);
+  const line = db.prepare('SELECT menu_item_id, quantity FROM order_items WHERE id = ?').get(orderItemId);
   db.prepare('DELETE FROM order_items WHERE id = ?').run(orderItemId);
+  if (line) adjustStock(line.menu_item_id, line.quantity);
   recalcOrder(orderId);
   return db.prepare('SELECT * FROM orders WHERE id = ?').get(orderId);
 }
@@ -1167,6 +1232,8 @@ ipcMain.handle('orders:cancel', (_e, orderId) => {
      WHERE id = ? AND status = 'open' RETURNING *`
   ).get(currentStaff.id, currentStaff.name, orderId);
   if (!order) throw new Error('Only open orders can be cancelled');
+  const items = db.prepare('SELECT menu_item_id, quantity FROM order_items WHERE order_id = ?').all(orderId);
+  items.forEach((i) => adjustStock(i.menu_item_id, i.quantity));
   return order;
 });
 

@@ -34,6 +34,7 @@ contextBridge.exposeInMainWorld('pos', {
     delete: (id) => ipcRenderer.invoke('menu:delete', id),
     toggleAvailability: (id) => ipcRenderer.invoke('menu:toggleAvailability', id),
     bulkSetGstRate: (payload) => ipcRenderer.invoke('menu:bulkSetGstRate', payload),
+    updateStock: (payload) => ipcRenderer.invoke('menu:updateStock', payload),
   },
   modifiers: {
     listGroups: (menuItemId) => ipcRenderer.invoke('modifiers:listGroups', menuItemId),
