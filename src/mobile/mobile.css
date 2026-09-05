@@ -137,7 +137,53 @@ button, input { font-family: inherit; font-size: 16px; }
 
 .order-total { font-weight: 700; font-size: 18px; text-align: right; margin: 8px 0 20px; }
 
-.menu-list { display: flex; flex-direction: column; gap: 8px; margin-bottom: 12px; }
+.search-input {
+  display: block;
+  width: 100%;
+  padding: 12px 14px;
+  margin-top: 10px;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+  background: var(--ink-soft);
+  color: var(--text-on-ink);
+}
+.search-input::placeholder { color: var(--text-on-ink-dim); }
+
+.category-tabs {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  margin-top: 10px;
+  padding-bottom: 4px;
+}
+.category-tab {
+  flex-shrink: 0;
+  padding: 8px 14px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--text-on-ink-dim);
+  font-size: 14px;
+  white-space: nowrap;
+}
+.category-tab.active {
+  background: var(--copper);
+  border-color: var(--copper);
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.menu-list { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; margin-bottom: 12px; }
+
+/* Sticky, not fixed — sticks to the viewport bottom once scrolled that
+   far without needing a separate fixed-position layout/z-index dance,
+   and naturally respects #app's max-width/centering instead of a fixed
+   element spanning the full viewport width on a tablet. */
+#fire-kot-btn {
+  position: sticky;
+  bottom: 12px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+}
 .menu-item-row {
   display: flex;
   width: 100%;

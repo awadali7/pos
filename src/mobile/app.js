@@ -24,6 +24,8 @@ let modifierPickerItem = null;
 let modifierPickerGroups = [];
 let isSubmitting = false; // guards the order-screen poll from clobbering a mutation in flight
 let pollTimer = null;
+let activeCategory = 'All';
+let searchQuery = '';
 
 async function api(path, { method = 'GET', body } = {}) {
   const headers = { 'Content-Type': 'application/json' };
@@ -146,10 +148,14 @@ async function enterOrderScreen() {
   showScreen('screen-order');
   document.getElementById('order-error').classList.add('hidden');
   document.getElementById('order-table-name').textContent = currentOrder.table_label || `Order #${currentOrder.id}`;
+  activeCategory = 'All';
+  searchQuery = '';
+  document.getElementById('menu-search').value = '';
   if (!menuItems.length) {
     try { menuItems = await api('/api/mobile/menu'); } catch (err) { alert(`Could not load menu: ${err.message}`); }
   }
   renderOrder();
+  renderCategoryTabs();
   renderMenuList();
   stopPolling();
   pollTimer = setInterval(pollOrder, 4000);
@@ -217,14 +223,41 @@ async function changeItemQty(item, newQty) {
   }
 }
 
+// Tabs are derived from menuItems itself rather than a separate
+// categories fetch — listMenu() (main.js) already orders items by each
+// category's sort_order, so de-duping category_name in that same order
+// (Set preserves insertion order) reproduces the desktop's tab order
+// without a second API call.
+function renderCategoryTabs() {
+  const wrap = document.getElementById('category-tabs');
+  const names = ['All', ...new Set(menuItems.map((m) => m.category_name || 'Other'))];
+  wrap.innerHTML = names.map((name) => `
+    <button class="category-tab ${name === activeCategory ? 'active' : ''}" data-category="${escapeHtml(name)}">${escapeHtml(name)}</button>
+  `).join('');
+  wrap.querySelectorAll('.category-tab').forEach((tab) => {
+    tab.addEventListener('click', () => {
+      activeCategory = tab.dataset.category;
+      wrap.querySelectorAll('.category-tab').forEach((t) => t.classList.toggle('active', t === tab));
+      renderMenuList();
+    });
+  });
+}
+
 function renderMenuList() {
   const wrap = document.getElementById('menu-list');
-  wrap.innerHTML = menuItems.filter((m) => m.is_available).map((m) => `
+  const query = searchQuery.trim().toLowerCase();
+  const filtered = menuItems.filter((m) => {
+    if (!m.is_available) return false;
+    if (activeCategory !== 'All' && (m.category_name || 'Other') !== activeCategory) return false;
+    if (query && !m.name.toLowerCase().includes(query)) return false;
+    return true;
+  });
+  wrap.innerHTML = filtered.length ? filtered.map((m) => `
     <button class="menu-item-row" data-item-id="${m.id}">
       <span class="menu-item-name">${escapeHtml(m.name)}</span>
       <span class="menu-item-price">&#8377;${money(m.price)}</span>
     </button>
-  `).join('');
+  `).join('') : '<p class="hint">No items match.</p>';
   wrap.querySelectorAll('.menu-item-row').forEach((row) => {
     row.addEventListener('click', () => {
       const item = menuItems.find((m) => m.id === Number(row.dataset.itemId));
@@ -232,6 +265,11 @@ function renderMenuList() {
     });
   });
 }
+
+document.getElementById('menu-search').addEventListener('input', (e) => {
+  searchQuery = e.target.value;
+  renderMenuList();
+});
 
 // Dispatcher for tapping a menu item: items with modifier groups need a
 // picker first (size/add-ons/etc.), plain items go straight onto the
