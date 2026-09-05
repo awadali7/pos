@@ -399,6 +399,52 @@
       </div>
 
       <div class="settings-section">
+        <h3>Kitchen printer (KOT)</h3>
+        <p class="settings-hint">Defaults to the same printer as receipts above — only set this up separately if kitchen tickets should print somewhere else (e.g. a printer physically at the kitchen instead of the counter).</p>
+        <div class="settings-grid">
+          <label class="context-field">
+            <span>Printing method</span>
+            <select id="settings-kot-printer-mode">
+              <option value="">Same as receipt printer (default)</option>
+              <option value="dialog">Browser print dialog</option>
+              <option value="system">System printer (silent)</option>
+              <option value="network">Network thermal printer (ESC/POS)</option>
+            </select>
+          </label>
+          <label class="context-field">
+            <span>Paper width</span>
+            <select id="settings-kot-printer-paper-width">
+              <option value="58">58mm</option>
+              <option value="80">80mm</option>
+            </select>
+          </label>
+        </div>
+
+        <div id="settings-kot-printer-system-block" class="settings-grid hidden">
+          <div class="category-manage-group settings-field-wide">
+            <label class="context-field">
+              <span>System printer</span>
+              <select id="settings-kot-printer-system-name"></select>
+            </label>
+            <button id="settings-kot-printer-refresh-btn" type="button" class="btn btn-ghost">Refresh</button>
+          </div>
+        </div>
+
+        <div id="settings-kot-printer-network-block" class="settings-grid hidden">
+          <label class="context-field">
+            <span>Printer host / IP</span>
+            <input id="settings-kot-printer-network-host" type="text" placeholder="e.g. 192.168.1.60" />
+          </label>
+          <label class="context-field">
+            <span>Port</span>
+            <input id="settings-kot-printer-network-port" type="number" min="1" step="1" placeholder="9100" />
+          </label>
+        </div>
+
+        <button id="settings-kot-printer-test-btn" type="button" class="btn btn-ghost" disabled>Test print</button>
+      </div>
+
+      <div class="settings-section">
         <h3>Mobile ordering</h3>
         <p class="settings-hint">Let staff take dine-in orders and fire KOTs from their own phone or tablet, over the same WiFi as this computer. Only works while this app is running and both devices share that network.</p>
         <div class="settings-grid">

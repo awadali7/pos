@@ -21,7 +21,7 @@ documentation — see [README.md](README.md) for what the app does.
 | `customers` | `lookup` |
 | `shifts` | `current`, `open`, `preview`, `close`, `history` |
 | `printers` | `listSystem` |
-| `receipt` | `print`, `testPrint`, `printKot`, `confirmKotPrinted` |
+| `receipt` | `print`, `testPrint`, `printKot`, `confirmKotPrinted`, `testPrintKot` |
 | `reports` | `summary`, `exportExcel` |
 | `settings` | `get`, `update` |
 | `mobile` | `getServerInfo` |
@@ -80,13 +80,23 @@ both wherever an order concludes.
 `gstin`, `fssaiNo`, `invoicePrefix`, `upiId`, `footerNote`,
 `zomatoRestaurantId`, `printerMode` (`dialog | system | network`),
 `printerSystemName`, `printerNetworkHost`, `printerNetworkPort`,
-`printerPaperWidth`, `mobileServerEnabled`, `mobileServerPort`.
+`printerPaperWidth`, `kotPrinterMode` (`'' | dialog | system | network`),
+`kotPrinterSystemName`, `kotPrinterNetworkHost`, `kotPrinterNetworkPort`,
+`kotPrinterPaperWidth`, `mobileServerEnabled`, `mobileServerPort`.
 
 ## Printer (`printer/escpos.js` + `main.js` `printBufferToNetworkPrinter`)
 
-Three `printerMode`s: `dialog` (OS print dialog via Electron), `system`
-(named OS printer, see `printers:listSystem`), `network` (raw ESC/POS
-bytes over TCP to `printerNetworkHost:printerNetworkPort`).
+Two independent printer roles, same three `printerMode`s each: `dialog`
+(OS print dialog via Electron), `system` (named OS printer, see
+`printers:listSystem`), `network` (raw ESC/POS bytes over TCP to
+`<host>:<port>`). `getPrinterSettings()` is the **receipt** printer (bills,
+used by `printReceipt()`); `getKotPrinterSettings()` is the **KOT**
+printer (kitchen tickets, used by `printKot()`) — its `kotPrinterMode`
+empty/unset means "same printer as receipts" (`getKotPrinterSettings()`
+falls back to `getPrinterSettings()` in that case), so every existing
+install keeps working unchanged until an owner explicitly configures a
+separate kitchen printer in Settings. `receipt:testPrintKot` exercises the
+KOT path the same way `receipt:testPrint` exercises the receipt path.
 `escpos.js` has no Electron/DB dependency — see the `test-backend-logic`
 skill for testing it standalone.
 
@@ -111,9 +121,10 @@ extracted core functions the desktop IPC handlers use (`createOrder`,
 `listOpenTables`, `listOpenOrders`, `getOrderDetail`, `listMenu`,
 `listModifierGroups`), so money/tax/modifier/table-locking logic is
 identical, not reimplemented. `POST /api/mobile/orders/:id/fire-kot`
-rejects with 409 when `printerMode` is `dialog`, since that mode only
-works via the desktop renderer's own `window.print()` — there is no
-equivalent on a phone.
+rejects with 409 when the *effective* KOT printer mode
+(`getKotPrinterSettings().mode`, see the Printer section below) is
+`dialog`, since that mode only works via the desktop renderer's own
+`window.print()` — there is no equivalent on a phone.
 
 `mobile:getServerInfo` (IPC) returns `{enabled, port, lanIp, url,
 qrDataUrl}` for the Settings screen's "Mobile ordering" section — `lanIp`

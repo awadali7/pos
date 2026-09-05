@@ -433,6 +433,8 @@ button, input, select {
 #add-table-btn.btn-ghost,
 #settings-printer-refresh-btn.btn-ghost,
 #settings-printer-test-btn.btn-ghost,
+#settings-kot-printer-refresh-btn.btn-ghost,
+#settings-kot-printer-test-btn.btn-ghost,
 #lock-btn.btn-ghost,
 #add-staff-btn.btn-ghost,
 #shift-action-btn.btn-ghost {
@@ -472,14 +474,23 @@ button, input, select {
    10 + 14 = 24px total, matching .settings-section's own margin-bottom —
    the spacing this file already uses to separate one action from the next,
    rather than the tighter 14px rhythm used between field rows. */
-#settings-printer-test-btn { margin-top: 10px; }
+#settings-printer-test-btn, #settings-kot-printer-test-btn { margin-top: 10px; }
 .settings-field-wide { grid-column: 1 / -1; }
 
+/* align-items: flex-start, not center — the text column is much shorter
+   than the 120px QR image, and centering it left a dead gap above the
+   text before anything visible appeared. Card treatment (background/
+   border/padding) groups the URL+QR as one distinct "connection info"
+   panel instead of two elements floating loose under the toggle. */
 .settings-mobile-info {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 16px;
   margin-top: 14px;
+  padding: 14px 16px;
+  background: var(--ink-soft);
+  border: 1px solid var(--line);
+  border-radius: 10px;
 }
 .settings-mobile-hint {
   color: var(--text-on-ink-dim);
@@ -494,8 +505,8 @@ button, input, select {
   margin: 0;
 }
 .settings-mobile-qr {
-  width: 120px;
-  height: 120px;
+  width: 100px;
+  height: 100px;
   border-radius: 8px;
   border: 1px solid var(--line);
   background: #fff;

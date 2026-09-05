@@ -74,6 +74,7 @@ contextBridge.exposeInMainWorld('pos', {
     print: (payload) => ipcRenderer.invoke('receipt:print', payload),
     testPrint: () => ipcRenderer.invoke('receipt:testPrint'),
     printKot: (payload) => ipcRenderer.invoke('receipt:printKot', payload),
+    testPrintKot: () => ipcRenderer.invoke('receipt:testPrintKot'),
     confirmKotPrinted: (payload) => ipcRenderer.invoke('receipt:confirmKotPrinted', payload),
   },
   reports: {

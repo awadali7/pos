@@ -219,6 +219,23 @@ function getPrinterSettings(settings = getSettingsMap()) {
   };
 }
 
+// A separate kitchen-ticket printer is optional — kot_printer_mode empty
+// (the default for every existing install, since this key didn't exist
+// before) means "same printer as receipts", so nobody has to reconfigure
+// anything just because this feature shipped. Only once an owner picks an
+// explicit mode here does the KOT actually route to a different printer
+// than the one printReceipt() uses.
+function getKotPrinterSettings(settings = getSettingsMap()) {
+  if (!settings.kot_printer_mode) return getPrinterSettings(settings);
+  return {
+    mode: settings.kot_printer_mode,
+    systemName: settings.kot_printer_system_name || '',
+    networkHost: settings.kot_printer_network_host || '',
+    networkPort: settings.kot_printer_network_port ? Number(settings.kot_printer_network_port) : 9100,
+    paperWidthMm: settings.kot_printer_paper_width || '80',
+  };
+}
+
 // Minimal, receipt-only HTML document for the 'system' print path — NOT the
 // full app UI (src/index.html). Mirrors renderReceipt() in src/renderer.js
 // content-for-content (business header, invoice/order #, date, order type +
@@ -511,7 +528,7 @@ async function printReceipt({ order, items, gstBreakdown, business, payments = [
 // to { mode }. 'dialog' means the renderer must build and print its own
 // on-screen KOT content via window.print(), same fallback as receipts.
 async function printKot({ order, items }) {
-  const { mode, systemName, networkHost, networkPort, paperWidthMm } = getPrinterSettings();
+  const { mode, systemName, networkHost, networkPort, paperWidthMm } = getKotPrinterSettings();
 
   if (mode === 'system') {
     if (!systemName) throw new Error('No system printer selected — choose one in Settings first');
@@ -1331,6 +1348,24 @@ ipcMain.handle('receipt:testPrint', async () => {
   return printReceipt({ order, items: testItems, gstBreakdown, business });
 });
 
+// Same idea as receipt:testPrint but exercises the KOT printer config
+// (getKotPrinterSettings) instead of the receipt one — the two can be
+// different printers, so testing one tells you nothing about the other.
+ipcMain.handle('receipt:testPrintKot', async () => {
+  requireRole('owner');
+  const order = {
+    id: 0,
+    order_type: 'dine-in',
+    table_label: 'Test',
+    created_at: new Date().toISOString().replace('T', ' ').slice(0, 19),
+  };
+  const items = [
+    { item_name: 'Test Item A', quantity: 2, notes: '' },
+    { item_name: 'Test Item B', quantity: 1, notes: 'Extra spicy' },
+  ];
+  return printKot({ order, items });
+});
+
 // Prints only the order_items not yet sent to the kitchen (kot_fired_at IS
 // NULL) — repeated taps only fire what's new since the last KOT, so the
 // kitchen never re-cooks an already-fired line. Resolves to { mode, count };
@@ -1539,6 +1574,14 @@ const SETTINGS_FIELDS = {
   printerNetworkHost: 'printer_network_host',
   printerNetworkPort: 'printer_network_port',
   printerPaperWidth: 'printer_paper_width', // '58' | '80' (mm)
+  // Kitchen (KOT) printer — independent of the receipt printer above, but
+  // kotPrinterMode empty/unset means "same as receipt printer" (see
+  // getKotPrinterSettings), so this is opt-in, not a second required setup.
+  kotPrinterMode: 'kot_printer_mode', // '' (inherit) | 'dialog' | 'system' | 'network'
+  kotPrinterSystemName: 'kot_printer_system_name',
+  kotPrinterNetworkHost: 'kot_printer_network_host',
+  kotPrinterNetworkPort: 'kot_printer_network_port',
+  kotPrinterPaperWidth: 'kot_printer_paper_width',
   // Mobile ordering server (see the "Mobile ordering server" section near
   // the end of this file) — off by default, same reasoning as printerMode
   // defaulting to 'dialog': existing installs must not suddenly start
@@ -1565,6 +1608,11 @@ ipcMain.handle('settings:get', () => {
     printerNetworkHost: map.printer_network_host || '',
     printerNetworkPort: Number(map.printer_network_port || 9100),
     printerPaperWidth: map.printer_paper_width || '80',
+    kotPrinterMode: map.kot_printer_mode || '',
+    kotPrinterSystemName: map.kot_printer_system_name || '',
+    kotPrinterNetworkHost: map.kot_printer_network_host || '',
+    kotPrinterNetworkPort: Number(map.kot_printer_network_port || 9100),
+    kotPrinterPaperWidth: map.kot_printer_paper_width || '80',
     mobileServerEnabled: map.mobile_server_enabled === '1',
     mobileServerPort: Number(map.mobile_server_port || 8080),
   };
@@ -1723,7 +1771,7 @@ const MOBILE_ROUTES = [
     // phone, so this is refused loudly here rather than silently no-op'ing
     // or leaving items half-fired.
     handler: (session, params) => {
-      if (getPrinterSettings().mode === 'dialog') {
+      if (getKotPrinterSettings().mode === 'dialog') {
         const err = new Error('Kitchen printing is set to Dialog mode, which only works from the desktop app — ask the desktop to fire this KOT, or switch Settings > Printer to System/Network mode.');
         err.statusCode = 409;
         throw err;

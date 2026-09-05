@@ -1764,10 +1764,16 @@ async function loadSettings() {
   document.getElementById('settings-printer-paper-width').value = settings.printerPaperWidth;
   document.getElementById('settings-printer-network-host').value = settings.printerNetworkHost;
   document.getElementById('settings-printer-network-port').value = settings.printerNetworkPort;
+  document.getElementById('settings-kot-printer-mode').value = settings.kotPrinterMode;
+  document.getElementById('settings-kot-printer-paper-width').value = settings.kotPrinterPaperWidth;
+  document.getElementById('settings-kot-printer-network-host').value = settings.kotPrinterNetworkHost;
+  document.getElementById('settings-kot-printer-network-port').value = settings.kotPrinterNetworkPort;
   document.getElementById('settings-mobile-enabled').checked = settings.mobileServerEnabled;
   document.getElementById('settings-mobile-port').value = settings.mobileServerPort;
-  await loadSystemPrinters(settings.printerSystemName);
+  await loadSystemPrinters(settings.printerSystemName, 'settings-printer-system-name');
+  await loadSystemPrinters(settings.kotPrinterSystemName, 'settings-kot-printer-system-name');
   updatePrinterModeVisibility();
+  updateKotPrinterModeVisibility();
   await loadMobileServerInfo();
   await renderStaffManageList();
 }
@@ -1782,11 +1788,13 @@ async function loadMobileServerInfo() {
   document.getElementById('settings-mobile-qr').src = info.qrDataUrl || '';
 }
 
-// Populates the system-printer <select> from printers:listSystem. Pass
-// `selectedName` (the saved settings value) on initial load; omit it (e.g.
-// from the Refresh button) to keep whatever is currently selected.
-async function loadSystemPrinters(selectedName) {
-  const select = document.getElementById('settings-printer-system-name');
+// Populates a system-printer <select> from printers:listSystem — shared by
+// the receipt and KOT printer sections, since both list the same OS
+// printers. Pass `selectedName` (the saved settings value) on initial
+// load; omit it (e.g. from a Refresh button) to keep whatever is currently
+// selected. `selectId` defaults to the receipt printer's select.
+async function loadSystemPrinters(selectedName, selectId = 'settings-printer-system-name') {
+  const select = document.getElementById(selectId);
   const wanted = selectedName !== undefined ? selectedName : select.value;
   select.innerHTML = '';
   try {
@@ -1822,10 +1830,6 @@ async function loadSystemPrinters(selectedName) {
   }
 }
 
-document.getElementById('settings-printer-refresh-btn').addEventListener('click', () => {
-  loadSystemPrinters();
-});
-
 function updatePrinterModeVisibility() {
   const mode = document.getElementById('settings-printer-mode').value;
   document.getElementById('settings-printer-system-block').classList.toggle('hidden', mode !== 'system');
@@ -1833,7 +1837,44 @@ function updatePrinterModeVisibility() {
   document.getElementById('settings-printer-test-btn').disabled = mode === 'dialog';
 }
 
-document.getElementById('settings-printer-mode').addEventListener('change', updatePrinterModeVisibility);
+// KOT mode has a 4th option ("" = inherit the receipt printer's mode), so
+// the system/network blocks only show for an explicit override, but the
+// test button's disabled state has to resolve the inherited mode too —
+// otherwise it'd stay enabled while inheriting 'dialog', where a test
+// print can't actually do anything (see printKot()'s dialog fallback).
+function updateKotPrinterModeVisibility() {
+  const kotMode = document.getElementById('settings-kot-printer-mode').value;
+  const effectiveMode = kotMode || document.getElementById('settings-printer-mode').value;
+  document.getElementById('settings-kot-printer-system-block').classList.toggle('hidden', kotMode !== 'system');
+  document.getElementById('settings-kot-printer-network-block').classList.toggle('hidden', kotMode !== 'network');
+  document.getElementById('settings-kot-printer-test-btn').disabled = effectiveMode === 'dialog';
+}
+
+document.getElementById('settings-printer-mode').addEventListener('change', () => {
+  updatePrinterModeVisibility();
+  updateKotPrinterModeVisibility(); // the KOT printer may be inheriting this mode
+});
+document.getElementById('settings-kot-printer-mode').addEventListener('change', updateKotPrinterModeVisibility);
+
+document.getElementById('settings-printer-refresh-btn').addEventListener('click', () => {
+  loadSystemPrinters(undefined, 'settings-printer-system-name');
+});
+document.getElementById('settings-kot-printer-refresh-btn').addEventListener('click', () => {
+  loadSystemPrinters(undefined, 'settings-kot-printer-system-name');
+});
+
+document.getElementById('settings-kot-printer-test-btn').addEventListener('click', async () => {
+  const btn = document.getElementById('settings-kot-printer-test-btn');
+  btn.disabled = true;
+  try {
+    await window.pos.receipt.testPrintKot();
+    alert('Test KOT sent.');
+  } catch (err) {
+    alert(`Test KOT failed: ${err.message}`);
+  } finally {
+    updateKotPrinterModeVisibility();
+  }
+});
 
 document.getElementById('settings-printer-test-btn').addEventListener('click', async () => {
   const btn = document.getElementById('settings-printer-test-btn');
@@ -1882,6 +1923,11 @@ document.getElementById('settings-save-btn').addEventListener('click', async () 
       printerSystemName: document.getElementById('settings-printer-system-name').value.trim(),
       printerNetworkHost: document.getElementById('settings-printer-network-host').value.trim(),
       printerNetworkPort: Number(document.getElementById('settings-printer-network-port').value) || 9100,
+      kotPrinterMode: document.getElementById('settings-kot-printer-mode').value,
+      kotPrinterPaperWidth: document.getElementById('settings-kot-printer-paper-width').value,
+      kotPrinterSystemName: document.getElementById('settings-kot-printer-system-name').value.trim(),
+      kotPrinterNetworkHost: document.getElementById('settings-kot-printer-network-host').value.trim(),
+      kotPrinterNetworkPort: Number(document.getElementById('settings-kot-printer-network-port').value) || 9100,
       // '1'/'0', not a raw boolean — settings:update stores every field via
       // String(value), and getMobileServerSettings() in main.js checks for
       // the literal string '1', not JS's String(true) === 'true'.
